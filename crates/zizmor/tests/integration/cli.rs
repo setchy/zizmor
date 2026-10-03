@@ -115,7 +115,7 @@ updates:
      --> <stdin>:3:5
       |
     3 |   - package-ecosystem: github-actions
-      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing cooldown configuration
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ insufficient implicit default-days (less than 7)
       |
       = note: audit confidence → High
       = note: this finding has an auto-fix
@@ -137,8 +137,8 @@ fn test_stdin_with_other_inputs() -> anyhow::Result<()> {
             .expects_failure(2)
             .args(["-", "some-dir/"])
             .run()?,
-        @r"
-    🌈 zizmor v@@VERSION@@
+        @"
+     INFO zizmor: 🌈 zizmor v@@VERSION@@
     error: `-` (stdin) cannot be combined with other inputs
 
     Usage: zizmor [OPTIONS] <INPUT>...
@@ -160,8 +160,8 @@ fn test_stdin_with_fix() -> anyhow::Result<()> {
             .expects_failure(2)
             .args(["--fix", "-"])
             .run()?,
-        @r"
-    🌈 zizmor v@@VERSION@@
+        @"
+     INFO zizmor: 🌈 zizmor v@@VERSION@@
     error: `--fix` cannot be used with `-` (stdin)
 
     Usage: zizmor [OPTIONS] <INPUT>...
@@ -184,7 +184,7 @@ fn test_stdin_invalid_yaml() -> anyhow::Result<()> {
             .args(["-"])
             .run()?,
         @"
-    🌈 zizmor v@@VERSION@@
+     INFO zizmor: 🌈 zizmor v@@VERSION@@
     fatal: no audit was performed
     failed to load <stdin> as workflow
 
@@ -208,7 +208,7 @@ fn test_stdin_invalid_yaml_strict() -> anyhow::Result<()> {
             .args(["--strict-collection", "-"])
             .run()?,
         @"
-    🌈 zizmor v@@VERSION@@
+     INFO zizmor: 🌈 zizmor v@@VERSION@@
     fatal: no audit was performed
     failed to load <stdin> as workflow
 
@@ -232,13 +232,13 @@ fn test_stdin_empty() -> anyhow::Result<()> {
             .args(["-"])
             .run()?,
         @"
-    🌈 zizmor v@@VERSION@@
+     INFO zizmor: 🌈 zizmor v@@VERSION@@
      WARN collect_inputs: zizmor::registry::input: stdin: could not parse as any known input type
     fatal: no audit was performed
     error: no inputs collected
       |
       = help: collection yielded no auditable inputs
-      = help: inputs must contain at least one valid workflow, action, or Dependabot config
+      = help: at least one valid, auditable input must be given
 
     Caused by:
         no inputs collected
@@ -395,7 +395,7 @@ jobs:
                 }
               ],
               "message": {
-                "text": "credential persistence through GitHub Actions artifacts"
+                "text": "credential persistence through GitHub Actions artifacts: does not set persist-credentials: false"
               },
               "properties": {
                 "zizmor/confidence": "Low",
@@ -558,7 +558,7 @@ jobs:
                 }
               ],
               "message": {
-                "text": "overly broad permissions"
+                "text": "overly broad permissions: default permissions used due to no permissions: block"
               },
               "properties": {
                 "zizmor/confidence": "Medium",
@@ -706,7 +706,7 @@ jobs:
                 }
               ],
               "message": {
-                "text": "unpinned action reference"
+                "text": "unpinned action reference: action is not pinned to a hash (required by blanket policy)"
               },
               "properties": {
                 "zizmor/confidence": "High",
@@ -790,13 +790,13 @@ fn test_stdin_valid_yaml_unknown_schema() -> anyhow::Result<()> {
             .args(["-"])
             .run()?,
         @"
-    🌈 zizmor v@@VERSION@@
+     INFO zizmor: 🌈 zizmor v@@VERSION@@
      WARN collect_inputs: zizmor::registry::input: stdin: could not parse as any known input type
     fatal: no audit was performed
     error: no inputs collected
       |
       = help: collection yielded no auditable inputs
-      = help: inputs must contain at least one valid workflow, action, or Dependabot config
+      = help: at least one valid, auditable input must be given
 
     Caused by:
         no inputs collected
@@ -818,13 +818,13 @@ fn test_stdin_valid_yaml_unknown_schema_strict() -> anyhow::Result<()> {
             .args(["--strict-collection", "-"])
             .run()?,
         @"
-    🌈 zizmor v@@VERSION@@
+     INFO zizmor: 🌈 zizmor v@@VERSION@@
      WARN collect_inputs: zizmor::registry::input: stdin: could not parse as any known input type
     fatal: no audit was performed
     error: no inputs collected
       |
       = help: collection yielded no auditable inputs
-      = help: inputs must contain at least one valid workflow, action, or Dependabot config
+      = help: at least one valid, auditable input must be given
 
     Caused by:
         no inputs collected

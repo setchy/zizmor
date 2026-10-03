@@ -33,12 +33,12 @@ jobs:
       actions: read          # Only needed for private repos. Needed for upload-sarif to read workflow run info.
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Run zizmor 🌈
-        uses: zizmorcore/zizmor-action@71321a20a9ded102f6e9ce5718a2fcec2c4f70d8 # v0.5.2
+        uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
 ```
 
 See the action's [`inputs` documentation][inputs-documentation] for
@@ -82,11 +82,14 @@ GitHub Actions setup:
       pull_request:
         branches: ["**"]
 
+    env:
+      ZIZMOR_VERSION: 1.30.1
+
     permissions: {}
 
     jobs:
       zizmor:
-        name: zizmor latest via PyPI
+        name: zizmor via PyPI
         runs-on: ubuntu-latest
         permissions:
           security-events: write # Required for upload-sarif (used by zizmor-action) to upload SARIF files.
@@ -94,20 +97,20 @@ GitHub Actions setup:
           actions: read          # Only needed for private repos. Needed for upload-sarif to read workflow run info.
         steps:
           - name: Checkout repository
-            uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+            uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
             with:
               persist-credentials: false
 
           - name: Install the latest version of uv
-            uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7.3.1
+            uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
 
           - name: Run zizmor 🌈
-            run: uvx zizmor --format=sarif . > results.sarif # (2)!
+            run: uvx "zizmor@${ZIZMOR_VERSION}" --format=sarif . > results.sarif # (2)!
             env:
               GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # (1)!
 
           - name: Upload SARIF file
-            uses: github/codeql-action/upload-sarif@0d579ffd059c29b07949a3cce3983f0780820c98 # v4.32.6
+            uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
             with:
               sarif_file: results.sarif
               category: zizmor
@@ -115,9 +118,8 @@ GitHub Actions setup:
 
     1. Optional: Remove the `env:` block to only run `zizmor`'s offline audits.
 
-    2. This installs the [zizmor package from PyPI], since it's pre-compiled
-       and therefore completes much faster. You could instead compile `zizmor`
-       within CI/CD with `cargo install zizmor`.
+    2. This installs a pinned [zizmor package from PyPI], since it's
+       pre-compiled and therefore completes much faster.
 
     For more inspiration, see `zizmor`'s own [repository workflow scan], as well
     as GitHub's example of [running ESLint] as a security workflow.
@@ -156,30 +158,34 @@ GitHub Actions setup:
       pull_request:
         branches: ["**"]
 
+    env:
+      ZIZMOR_VERSION: 1.30.1
+
     jobs:
       zizmor:
-        name: zizmor latest via PyPI
+        name: zizmor via PyPI
         runs-on: ubuntu-latest
         permissions:
           contents: read # Only needed for private repos. Needed to clone the repo.
         steps:
           - name: Checkout repository
-            uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+            uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+            with:
+              persist-credentials: false
 
           - name: Install the latest version of uv
-            uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7.3.1
+            uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
 
           - name: Run zizmor 🌈
-            run: uvx zizmor --format=github . # (2)!
+            run: uvx "zizmor@${ZIZMOR_VERSION}" --format=github . # (2)!
             env:
               GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # (1)!
     ```
 
     1. Optional: Remove the `env:` block to only run `zizmor`'s offline audits.
 
-    2. This installs the [zizmor package from PyPI], since it's pre-compiled
-       and therefore completes much faster. You could instead compile `zizmor`
-       within CI/CD with `cargo install zizmor`.
+    2. This installs a pinned [zizmor package from PyPI], since it's
+       pre-compiled and therefore completes much faster.
 
     !!! warning
 
@@ -224,16 +230,67 @@ GitHub Actions setup:
 `zizmor` can be integrated directly into your IDE or editor of choice,
 giving you real-time feedback on your workflows and action definitions.
 
+### Zed
+
+`zizmor` has an official extension for Zed!
+
+You can install it from the [Zed Marketplace](https://zed.dev/extensions/zizmor).
+
+The extension does *not* come with `zizmor` itself, so you will need to
+[separately install](./installation.md) `zizmor` in order for the extension
+to work.
+
+See @zizmorcore/zizmor-zed for more information.
+
 ### Visual Studio Code
 
 `zizmor` has an official extension for Visual Studio Code!
 
 You can install it from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=zizmor.zizmor-vscode).
+
 The extension does *not* come with `zizmor` itself, so you will need to
 [separately install](./installation.md) `zizmor` in order for the extension
 to work.
 
 See @zizmorcore/zizmor-vscode for full installation and configuration instructions.
+
+### Neovim
+
+Support for `zizmor` in neovim is provided by
+[`nvim-lspconfig`](https://github.com/neovim/nvim-lspconfig). As with Visual
+Studio Code, you must install `zizmor` [separately](./installation.md) for the
+LSP server to work. Then [follow the
+instructions](https://github.com/neovim/nvim-lspconfig#install) for installing
+`nvim-lspconfig` with your neovim package manager, and enable the LSP server in
+your `init.lua`:
+
+```lua
+vim.lsp.enable('zizmor')
+```
+
+For more information about LSP configuration in neovim, see `:h lspconfig-all`.
+
+### Sublime Text
+
+Support for `zizmor` in Sublime Text is provided via the
+[LSP](https://lsp.sublimetext.io/) package. As with Visual
+Studio Code, you must install `zizmor` [separately](./installation.md) for the
+LSP server to work.
+
+Install [LSP](https://packages.sublimetext.com/packages/LSP)
+and [YamlPipelines](https://packages.sublimetext.com/packages/YamlPipelines)
+packages using Package Control. Then, enable `zizmor` LSP by adding the following
+configuration in `Preferences > Package Settings > LSP > Server Configurations`:
+
+```json
+{
+    "zizmor": {
+        "enabled": true,
+        "command": ["zizmor", "--lsp"],
+        "selector": "source.yaml.pipeline.github-actions"
+    }
+}
+```
 
 ### Generic LSP integration
 
@@ -251,13 +308,13 @@ with the editor over `stdin` and `stdout`. No other transports are supported.
 ## VCS integrations
 
 ### `pre-commit`
-  
+
 `zizmor` can be used with the [`pre-commit`](https://pre-commit.com/) framework.
 To do so, add the following to your `.pre-commit-config.yaml` `#!yaml repos:` section:
 
 ```yaml
 - repo: https://github.com/zizmorcore/zizmor-pre-commit
-  rev: v1.22.0 # (1)!
+  rev: v1.30.1 # (1)!
   hooks:
   - id: zizmor
 ```
@@ -276,7 +333,7 @@ This will run `zizmor` on every commit.
     information on how to configure `pre-commit`.
 
 !!! tip
-  
+
     `zizmor-pre-commit` also works with [`prek`](https://github.com/j178/prek),
     a rewrite of `pre-commit` in Rust.
 
@@ -301,6 +358,13 @@ You can use `zizmor` with @super-linter/super-linter.
 Refer to the [super-linter documentation](https://github.com/super-linter/super-linter)
 for additional details.
 
+### megalinter
+
+You can use `zizmor` with @oxsecurity/megalinter.
+
+Refer to the [megalinter documentation](https://github.com/oxsecurity/megalinter)
+for additional details.
+
 ## Tab completion { #integration-tab-completion }
 
 !!! note
@@ -312,14 +376,50 @@ shells. It supports all of the shells supported by
 [`clap_complete`](https://crates.io/crates/clap_complete),
 which includes popular shells like `bash`, `zsh`, and `fish`.
 
-To enable tab completion, you can use the `--completions=<shell>` flag
-to emit a completion script for the specified shell. For example,
-to enable tab completion for `bash`, you can run:
+!!! tip
 
-```bash
-zizmor --completions=bash > ~/.bash_completion.d/zizmor # (1)!
-```
+    You can run `echo $SHELL` to help you determine your shell.
 
-1. The correct location of your completion script will depend on your
-   shell and its configuration. Consult your shell's documentation
-   for more information.
+To enable shell autocompletion for zizmor, run one of the following:
+
+=== "Bash"
+
+    ```bash
+    echo 'eval "$(zizmor --completions bash)"' >> ~/.bashrc
+    ```
+
+=== "Zsh"
+
+    ```bash
+    echo 'eval "$(zizmor --completions zsh)"' >> ~/.zshrc
+    ```
+
+=== "fish"
+
+    ```bash
+    echo 'zizmor --completions fish | source' > ~/.config/fish/completions/zizmor.fish
+    ```
+
+=== "Elvish"
+
+    ```bash
+    echo 'eval (zizmor --completions elvish | slurp)' >> ~/.elvish/rc.elv
+    ```
+
+=== "PowerShell / pwsh"
+
+    ```powershell
+    if (!(Test-Path -Path $PROFILE)) {
+      New-Item -ItemType File -Path $PROFILE -Force
+    }
+    Add-Content -Path $PROFILE -Value '(& zizmor --completions powershell) | Out-String | Invoke-Expression'
+    ```
+
+=== "Nushell"
+
+    ```nu
+    mkdir ($nu.user-autoload-dirs | first)
+    zizmor --completions nushell | save --force ($nu.user-autoload-dirs | first | path join zizmor.nu)
+    ```
+
+Then restart your shell or source your shell configuration file.

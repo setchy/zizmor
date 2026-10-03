@@ -1,8 +1,5 @@
-use std::sync::LazyLock;
-
 use anyhow::anyhow;
-use github_actions_models::common::Uses;
-use regex::Regex;
+use github_actions_models::common::{RepositoryUses, Uses};
 use subfeature::Subfeature;
 use yamlpatch::{Op, Patch};
 
@@ -10,11 +7,17 @@ use crate::{
     audit::{Audit, AuditError, AuditLoadError, AuditState, audit_meta},
     config::Config,
     finding::{
-        Confidence, Finding, Fix, Severity,
-        location::{Comment, Feature, Location, Routable},
+        Confidence, Finding, Fix, Persona, Severity,
+        location::{Comment, Feature, Locatable, Location, Routable as _},
     },
     github,
-    models::{StepCommon, action::CompositeStep, uses::RepositoryUsesExt, workflow::Step},
+    models::{
+        AsDocument, StepCommon,
+        action::CompositeStep,
+        uses::RepositoryUsesExt as _,
+        version::RawVersion,
+        workflow::{ReusableWorkflowCallJob, Step},
+    },
 };
 
 pub(crate) struct RefVersionMismatch {
@@ -24,52 +27,54 @@ pub(crate) struct RefVersionMismatch {
 audit_meta!(
     RefVersionMismatch,
     "ref-version-mismatch",
-    "action's hash pin does not match version comment"
+    "action's hash pin has mismatched or missing version comment"
 );
 
-#[allow(clippy::unwrap_used)]
-static VERSION_COMMENT_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    vec![
-        // Matches "# tag=v2.8.0" or "# tag=v1.2.3"
-        Regex::new(r"#\s*tag\s*=\s*(v\d+(?:\.\d+)*(?:\.\d+)?)").unwrap(),
-        // Matches "# v2.8.0"
-        Regex::new(r"#\s*(v\d+(?:\.\d+)*(?:\.\d+)?)").unwrap(),
-        // Matches version without 'v' prefix: "# tag=2.8.0"
-        Regex::new(r"#\s*tag\s*=\s*(\d+(?:\.\d+)*(?:\.\d+)?)").unwrap(),
-        // More flexible: "# version: 2.8.0"
-        Regex::new(r"#\s*(?:version|ver)\s*[:=]\s*(v?\d+(?:\.\d+)*(?:\.\d+)?)").unwrap(),
-    ]
-});
+/// The different states that can come from [`RefVersionMismatch::detect_version_comment`].
+#[derive(Debug)]
+enum VersionCommentState<'doc> {
+    /// No version comment was detected.
+    Missing,
+    /// A version comment was detected.
+    Version {
+        version: &'doc str,
+        comment: &'doc Comment<'doc>,
+    },
+    /// There was a comment (or comments), but none of them were version comments.
+    NonVersionComments,
+}
 
 impl RefVersionMismatch {
     fn extract_version_from_comments<'doc>(
-        &self,
         comments: &'doc [Comment<'doc>],
-    ) -> Option<&'doc str> {
+    ) -> Option<(&'doc str, &'doc Comment<'doc>)> {
         for comment in comments {
-            for pattern in VERSION_COMMENT_PATTERNS.iter() {
-                if let Some(captures) = pattern.captures(comment.as_ref())
-                    && let Some(version_match) = captures.get(1)
-                {
-                    return Some(version_match.as_str());
-                }
+            if let Some(version) = RawVersion::from_comment(comment) {
+                return Some((version.as_raw(), comment));
             }
         }
         None
     }
 
+    fn detect_version_comment<'doc>(comments: &'doc [Comment<'doc>]) -> VersionCommentState<'doc> {
+        match Self::extract_version_from_comments(comments) {
+            Some((version, comment)) => VersionCommentState::Version { version, comment },
+            None if comments.is_empty() => VersionCommentState::Missing,
+            None => VersionCommentState::NonVersionComments,
+        }
+    }
+
     /// Create a Fix for updating the version comment to match the pinned hash
-    fn create_version_comment_fix<'doc, S: StepCommon<'doc>>(
-        &self,
-        step: &S,
-        correct_tag: &str,
-    ) -> Fix<'doc> {
+    fn update_version_comment_fix<'a, 'doc, S>(&self, parent: &'a S, correct_tag: &str) -> Fix<'doc>
+    where
+        S: Locatable<'doc> + AsDocument<'a, 'doc>,
+    {
         Fix {
             title: format!("update version comment to match pinned hash: {correct_tag}"),
-            key: step.location().key,
+            key: parent.location().key,
             disposition: Default::default(),
             patches: vec![Patch {
-                route: step.route().with_key("uses"),
+                route: parent.route().with_key("uses"),
                 operation: Op::ReplaceComment {
                     new: format!("# {correct_tag}").into(),
                 },
@@ -77,83 +82,167 @@ impl RefVersionMismatch {
         }
     }
 
-    async fn audit_step_common<'doc, S: StepCommon<'doc>>(
+    /// Create a Fix for adding a version comment where none exists
+    fn add_version_comment_fix<'a, 'doc, S>(parent: &'a S, tag: &str) -> Fix<'doc>
+    where
+        S: Locatable<'doc> + AsDocument<'a, 'doc>,
+    {
+        Fix {
+            title: format!("add version comment: {tag}"),
+            key: parent.location().key,
+            disposition: Default::default(),
+            patches: vec![Patch {
+                route: parent.route().with_key("uses"),
+                operation: Op::EmplaceComment {
+                    new: format!("# {tag}").into(),
+                },
+            }],
+        }
+    }
+
+    async fn process_uses<'a, 'doc, S>(
         &self,
-        step: &S,
-    ) -> Result<Vec<Finding<'doc>>, AuditError> {
-        let mut findings = vec![];
-
-        let Some(Uses::Repository(uses)) = step.uses() else {
-            return Ok(findings);
-        };
-
+        uses: &'doc RepositoryUses,
+        parent: &'a S,
+    ) -> Result<Option<Finding<'doc>>, AuditError>
+    where
+        S: Locatable<'doc> + AsDocument<'a, 'doc>,
+    {
         // Only check steps that have commit refs (not symbolic refs like v1.0.0)
         let Some(commit_sha) = uses.commit_ref() else {
-            return Ok(findings);
+            return Ok(None);
         };
 
-        let step_location = step.location();
-        let uses_location = step_location
+        let parent_location = parent.location();
+        let uses_location = parent_location
             .with_keys(["uses".into()])
-            .concretize(step.document())
+            .concretize(parent.as_document())
             .map_err(Self::err)?;
 
-        let Some(version_from_comment) =
-            self.extract_version_from_comments(&uses_location.concrete.comments)
-        else {
-            return Ok(findings);
-        };
+        let comment_version_state = Self::detect_version_comment(&uses_location.concrete.comments);
 
-        let Some(commit_for_ref) = self
-            .client
-            .commit_for_ref(uses.owner(), uses.repo(), version_from_comment)
-            .await
-            .map_err(Self::err)?
-        else {
-            // TODO(ww): Does it make sense to flag this as well?
-            // This indicates a completely bogus version comment,
-            // rather than a mismatch.
-            return Ok(findings);
-        };
+        let (version, comment) = match comment_version_state {
+            VersionCommentState::Version { version, comment } => (version, comment),
+            VersionCommentState::Missing | VersionCommentState::NonVersionComments => {
+                // SHA-pinned action without a recognized version comment.
+                let Some(tag) = self
+                    .client
+                    .longest_tag_for_commit(&uses.into(), uses.subpath(), commit_sha)
+                    .await
+                    .map_err(Self::err)?
+                else {
+                    return Ok(None);
+                };
 
-        if commit_for_ref != commit_sha {
-            let subfeature = Subfeature::new(
-                uses_location.concrete.location.offset_span.end,
-                version_from_comment,
-            );
+                let (annotation, tip) = match comment_version_state {
+                    VersionCommentState::Missing => (
+                        "missing version comment",
+                        format!("add version comment '# {}'", tag.name),
+                    ),
+                    VersionCommentState::NonVersionComments => (
+                        "comment does not contain a version",
+                        format!("rewrite comment to include '# {}'", tag.name),
+                    ),
+                    VersionCommentState::Version { .. } => unreachable!(),
+                };
 
-            let mut builder = Self::finding()
-                .severity(Severity::Medium)
-                .confidence(Confidence::High)
-                .add_raw_location(Location::new(
-                    // NOTE(ww): We trim the commit SHA to 12 characters
-                    // for display purposes; 12 is a conservative length
-                    // that avoids collisions in Linux-sized repositories.
-                    uses_location.symbolic.clone().primary().annotated(format!(
-                        "points to commit {short_commit}",
-                        short_commit = &commit_for_ref[..12]
-                    )),
-                    Feature::from_subfeature(&subfeature, step),
-                ));
+                let mut builder = Self::finding()
+                    .severity(Severity::Low)
+                    .confidence(Confidence::High)
+                    .persona(Persona::Pedantic)
+                    .add_location(parent_location.hidden())
+                    .add_location(
+                        uses_location
+                            .symbolic
+                            .primary()
+                            .subfeature(Subfeature::new(0, uses.raw()))
+                            .annotated(annotation),
+                    )
+                    .tip(tip);
 
-            if let Some(suggestion) = self
-                .client
-                .longest_tag_for_commit(uses.owner(), uses.repo(), commit_sha)
-                .await
-                .map_err(Self::err)?
-            {
-                builder = builder.add_location(
-                    uses_location
-                        .symbolic
-                        .annotated(format!("is pointed to by tag {tag}", tag = suggestion.name)),
-                );
-                // Add auto-fix to update the version comment to match the pinned hash
-                builder = builder.fix(self.create_version_comment_fix(step, &suggestion.name));
+                if matches!(comment_version_state, VersionCommentState::Missing) {
+                    builder = builder.fix(Self::add_version_comment_fix(parent, &tag.name));
+                }
+
+                return Ok(Some(builder.build(parent).map_err(Self::err)?));
             }
-            findings.push(builder.build(step).map_err(Self::err)?);
+        };
+
+        let git_ref = self
+            .client
+            .lookup_ref(&uses.into(), version)
+            .await
+            .map_err(Self::err)?;
+
+        // If the ref matches, there's nothing to do.
+        if git_ref.as_ref().map(|r| r.commit()) == Some(commit_sha) {
+            return Ok(None);
         }
 
-        Ok(findings)
+        // Bug #2393: the user might try to use a block-style YAML string for the `uses:` clause,
+        // and then try and put the version comment next to the block start (e.g. `uses: |- # 1.2.3`).
+        //
+        // Previously this would cause a hard crash because the subfeature previously assumed that the
+        // comment comes *after* the `uses:` clause's contents, which isn't true in that case.
+        //
+        // Note that this is arguably not correct either: Dependabot and other tools expect the version
+        // comment to be on the same line as the `org/repo` reference, not just anywhere on the
+        // `uses:` clause. We could pretty easily reject this in the future instead by checking whether the
+        // comment's start is before the end of the `uses:` clause.
+        let subfeature = Subfeature::new(comment.location().offset_span.start, version);
+
+        let comment_location = match git_ref {
+            Some(commit_for_ref) => Location::new(
+                uses_location.symbolic.clone().primary().annotated(format!(
+                    "{kind} points to commit {short_commit}",
+                    kind = commit_for_ref.kind(),
+                    short_commit = &commit_for_ref.commit()[..12]
+                )),
+                Feature::from_subfeature(&subfeature, parent),
+            ),
+            None => Location::new(
+                uses_location
+                    .symbolic
+                    .clone()
+                    .primary()
+                    .annotated("points to unknown ref"),
+                Feature::from_subfeature(&subfeature, parent),
+            ),
+        };
+
+        let mut builder = Self::finding()
+            .severity(Severity::Medium)
+            .confidence(Confidence::High)
+            .add_raw_location(comment_location);
+
+        if let Some(suggestion) = self
+            .client
+            .longest_tag_for_commit(&uses.into(), uses.subpath(), commit_sha)
+            .await
+            .map_err(Self::err)?
+        {
+            builder = builder.add_location(parent_location.hidden()).add_location(
+                uses_location
+                    .symbolic
+                    .subfeature(Subfeature::new(0, uses.raw()))
+                    .annotated(format!("is pointed to by tag {tag}", tag = suggestion.name)),
+            );
+            // Add auto-fix to update the version comment to match the pinned hash
+            builder = builder.fix(self.update_version_comment_fix(parent, &suggestion.name));
+        }
+
+        Ok(Some(builder.build(parent).map_err(Self::err)?))
+    }
+
+    async fn process_step<'doc, S: StepCommon<'doc>>(
+        &self,
+        step: &S,
+    ) -> Result<Option<Finding<'doc>>, AuditError> {
+        let Some(Uses::Repository(uses)) = step.uses() else {
+            return Ok(None);
+        };
+
+        self.process_uses(uses, step).await
     }
 }
 
@@ -178,7 +267,7 @@ impl Audit for RefVersionMismatch {
         step: &Step<'doc>,
         _config: &Config,
     ) -> Result<Vec<Finding<'doc>>, AuditError> {
-        self.audit_step_common(step).await
+        Ok(self.process_step(step).await?.into_iter().collect())
     }
 
     async fn audit_composite_step<'doc>(
@@ -186,181 +275,53 @@ impl Audit for RefVersionMismatch {
         step: &CompositeStep<'doc>,
         _config: &Config,
     ) -> Result<Vec<Finding<'doc>>, AuditError> {
-        self.audit_step_common(step).await
+        Ok(self.process_step(step).await?.into_iter().collect())
+    }
+
+    async fn audit_reusable_job<'doc>(
+        &self,
+        job: &ReusableWorkflowCallJob<'doc>,
+        _config: &Config,
+    ) -> Result<Vec<Finding<'doc>>, AuditError> {
+        let Uses::Repository(uses) = &job.uses else {
+            return Ok(vec![]);
+        };
+
+        Ok(self.process_uses(uses, job).await?.into_iter().collect())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use super::*;
+    use crate::{models::action::Action, registry::input::InputKey};
 
     #[test]
-    fn test_version_comment_patterns() {
-        let test_cases = vec![
-            ("# tag=v2.8.0", Some("v2.8.0")),
-            ("# v2.8.0", Some("v2.8.0")),
-            ("# tag=2.8.0", Some("2.8.0")),
-            ("# version: 2.8.0", Some("2.8.0")),
-            ("# ver=1.0.0", Some("1.0.0")),
-            ("# some other comment", None),
-        ];
-
-        for (comment, expected) in test_cases {
-            // Test the pattern matching directly
-            let comment_text = comment;
-            let mut found_version = None;
-            for pattern in VERSION_COMMENT_PATTERNS.iter() {
-                if let Some(captures) = pattern.captures(comment_text) {
-                    if let Some(version_match) = captures.get(1) {
-                        found_version = Some(version_match.as_str());
-                        break;
-                    }
-                }
-            }
-            assert_eq!(found_version, expected, "Failed for comment: {}", comment);
-        }
-    }
-
-    #[cfg(feature = "gh-token-tests")]
-    #[tokio::test]
-    async fn test_fix_version_comment_mismatch() {
-        use crate::config::Config;
-        use crate::{
-            models::{AsDocument, workflow::Workflow},
-            registry::input::InputKey,
-        };
-
-        let workflow_content = r#"
-name: Test Version Comment Mismatch
-on: push
-permissions: {}
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout with mismatched version comment
-        uses: actions/checkout@a81bbbf8298c0fa03ea29cdc80d8d0ce8b6c2f2c # v3.0.0
+    fn test_comment_version_state_with_unrelated_comment() {
+        let action_content = r#"
+name: Test Missing Version Comment
+description: Test Missing Version Comment
+runs:
+  using: composite
+  steps:
+    - name: Checkout with unrelated comment
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # some comment
 "#;
 
-        let key = InputKey::local(
-            "fakegroup".into(),
-            "test_version_mismatch.yml",
-            None::<&str>,
-        );
-        let workflow = Workflow::from_string(workflow_content.to_string(), key).unwrap();
-
-        let state = crate::state::AuditState::new(
-            false,
-            Some(
-                github::Client::new(
-                    &github::GitHubHost::default(),
-                    &github::GitHubToken::new(&std::env::var("GH_TOKEN").unwrap()).unwrap(),
-                    "/tmp".into(),
-                )
-                .unwrap(),
-            ),
-        );
-
-        let audit = RefVersionMismatch::new(&state).unwrap();
-
-        let input = workflow.into();
-        let findings = audit
-            .audit(RefVersionMismatch::ident(), &input, &Config::default())
-            .await
+        let key = InputKey::local("fakegroup".into(), "action.yml", None, None);
+        let action = Action::from_string(action_content.to_string(), key).unwrap();
+        let step = action.steps().unwrap().next().unwrap();
+        let uses_location = step
+            .location()
+            .with_keys(["uses".into()])
+            .concretize(step.document())
             .unwrap();
 
-        // We expect at least one finding if there's a version mismatch
-        assert!(!findings.is_empty(), "Expected to find version mismatch");
-
-        // Only test the fix if one is available (depends on GitHub API response)
-        if !findings[0].fixes.is_empty() {
-            let new_doc = findings[0].fixes[0].apply(input.as_document()).unwrap();
-            insta::assert_snapshot!(new_doc.source(), @r"
-            name: Test Version Comment Mismatch
-            on: push
-            permissions: {}
-            jobs:
-              test:
-                runs-on: ubuntu-latest
-                steps:
-                  - name: Checkout with mismatched version comment
-                    uses: actions/checkout@a81bbbf8298c0fa03ea29cdc80d8d0ce8b6c2f2c # v3.0.2
-            ");
-        }
-    }
-
-    #[cfg(feature = "gh-token-tests")]
-    #[tokio::test]
-    async fn test_fix_version_comment_different_formats() {
-        use crate::config::Config;
-        use crate::{
-            models::{AsDocument, workflow::Workflow},
-            registry::input::InputKey,
-        };
-
-        let workflow_content = r#"
-name: Test Different Version Formats
-on: push
-permissions: {}
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Tag format
-        uses: actions/checkout@a81bbbf8298c0fa03ea29cdc80d8d0ce8b6c2f2c # tag=v3.0.0
-      - name: Simple format
-        uses: actions/checkout@a81bbbf8298c0fa03ea29cdc80d8d0ce8b6c2f2c # v3.0.0
-      - name: Version format
-        uses: actions/checkout@a81bbbf8298c0fa03ea29cdc80d8d0ce8b6c2f2c # version: 3.0.0
-"#;
-
-        let key = InputKey::local(
-            "fakegroup".into(),
-            "test_different_formats.yml",
-            None::<&str>,
+        assert_matches!(
+            RefVersionMismatch::detect_version_comment(&uses_location.concrete.comments),
+            VersionCommentState::NonVersionComments,
         );
-        let workflow = Workflow::from_string(workflow_content.to_string(), key).unwrap();
-
-        let state = crate::state::AuditState::new(
-            false,
-            Some(
-                github::Client::new(
-                    &github::GitHubHost::default(),
-                    &github::GitHubToken::new(&std::env::var("GH_TOKEN").unwrap()).unwrap(),
-                    "/tmp".into(),
-                )
-                .unwrap(),
-            ),
-        );
-
-        let audit = RefVersionMismatch::new(&state).unwrap();
-
-        let input = workflow.into();
-        let findings = audit
-            .audit(RefVersionMismatch::ident(), &input, &Config::default())
-            .await
-            .unwrap();
-
-        assert!(!findings.is_empty(), "Expected to find version mismatch");
-
-        // Only test the fix if one is available (depends on GitHub API response)
-        if !findings[0].fixes.is_empty() {
-            let new_doc = findings[0].fixes[0].apply(input.as_document()).unwrap();
-            insta::assert_snapshot!(new_doc.source(), @r"
-            name: Test Different Version Formats
-            on: push
-            permissions: {}
-            jobs:
-              test:
-                runs-on: ubuntu-latest
-                steps:
-                  - name: Tag format
-                    uses: actions/checkout@a81bbbf8298c0fa03ea29cdc80d8d0ce8b6c2f2c # v3.0.2
-                  - name: Simple format
-                    uses: actions/checkout@a81bbbf8298c0fa03ea29cdc80d8d0ce8b6c2f2c # v3.0.0
-                  - name: Version format
-                    uses: actions/checkout@a81bbbf8298c0fa03ea29cdc80d8d0ce8b6c2f2c # version: 3.0.0
-            ");
-        }
     }
 }

@@ -1,8 +1,8 @@
-use std::ops::{Deref, Range};
+use std::ops::{Deref as _, Range};
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use github_actions_models::action;
-use github_actions_models::workflow::job::StepBody;
+use github_actions_models::workflow::job;
 use tree_sitter::{
     Language, Parser, QueryCapture, QueryCursor, QueryMatches, StreamingIterator as _, Tree,
 };
@@ -12,8 +12,8 @@ use crate::audit::AuditError;
 use crate::config::Config;
 use crate::finding::location::Locatable as _;
 use crate::finding::{Confidence, Finding, Severity};
-use crate::models::StepCommon;
-use crate::models::{workflow::JobCommon as _, workflow::Step};
+use crate::models::StepCommon as _;
+use crate::models::workflow::{Step, StepInner};
 use crate::state::AuditState;
 use crate::utils;
 use crate::utils::once::static_regex;
@@ -143,7 +143,7 @@ impl GitHubEnv {
         cursor: &'a mut QueryCursor,
         tree: &'a Tree,
         source: &'a str,
-    ) -> QueryMatches<'a, 'a, &'a [u8], &'a [u8]> {
+    ) -> QueryMatches<'a, 'a, 'static, &'a [u8], &'a [u8]> {
         cursor.matches(query, tree.root_node(), source.as_bytes())
     }
 
@@ -189,7 +189,7 @@ impl GitHubEnv {
         matches.for_each(|mat| {
             let cmd = {
                 let cap = mat
-                    .captures
+                    .captures()
                     .iter()
                     .find(|cap| cap.index == cmd)
                     .expect("internal error: expected capture for cmd");
@@ -198,20 +198,21 @@ impl GitHubEnv {
                     .expect("impossible: capture should be UTF-8 by construction")
             };
 
-            let args = mat.captures.iter().filter(|cap| cap.index == args);
+            let args = mat.captures().iter().filter(|cap| cap.index == args);
 
-            // Filter matches down to those where the command isn't `echo`
+            // Filter matches down to those where the command isn't `echo` or `printf`
             // *or* at least one argument isn't a string literal.
-            if cmd != "echo" || !self.bash_echo_args_are_safe(args) {
+            // TODO: other echo-like commands to check here?
+            if (cmd != "echo" && cmd != "printf") || !self.bash_echo_args_are_safe(args) {
                 let span = mat
-                    .captures
+                    .captures()
                     .iter()
                     .find(|cap| cap.index == self.bash_redirect_query.span_idx)
                     .expect("internal error: expected capture for span");
 
                 let destination = {
                     let cap = mat
-                        .captures
+                        .captures()
                         .iter()
                         .find(|cap| cap.index == destination)
                         .expect("internal error: expected capture for destination");
@@ -236,14 +237,14 @@ impl GitHubEnv {
 
             matches.for_each(|mat| {
                 let span = mat
-                    .captures
+                    .captures()
                     .iter()
                     .find(|cap| cap.index == query.span_idx)
                     .expect("internal error: expected capture for span");
 
                 let destination = {
                     let cap = mat
-                        .captures
+                        .captures()
                         .iter()
                         .find(|cap| cap.index == destination)
                         .expect("internal error: expected capture for destination");
@@ -298,14 +299,14 @@ impl GitHubEnv {
             let matches = self.query(query, &mut cursor, &tree, script_body);
             matches.for_each(|mat| {
                 let span = mat
-                    .captures
+                    .captures()
                     .iter()
                     .find(|cap| cap.index == query.span_idx)
                     .expect("internal error: no matching capture");
 
                 let destination = {
                     let cap = mat
-                        .captures
+                        .captures()
                         .iter()
                         .find(|cap| cap.index == destination)
                         .expect("internal error: no matching capture");
@@ -387,19 +388,18 @@ impl Audit for GitHubEnv {
         let workflow = step.workflow();
 
         let has_dangerous_triggers =
-            workflow.has_workflow_run() || workflow.has_pull_request_target();
+            workflow.workflow_run().is_some() || workflow.pull_request_target().is_some();
 
         if !has_dangerous_triggers {
             return Ok(findings);
         }
 
-        if let StepBody::Run { run, .. } = &step.deref().body {
+        if let StepInner::Run(job::RunStep { run, .. }) = &step.deref() {
             let shell = step.shell().map(|s| s.0).unwrap_or_else(|| {
                 tracing::warn!(
-                    "github-env: couldn't determine shell type for {workflow}:{job} step {stepno}; assuming bash",
+                    "github-env: couldn't determine shell type for {workflow} step {loc:#?}; assuming bash",
                     workflow = step.workflow().key.presentation_path(),
-                    job = step.parent.id(),
-                    stepno = step.index
+                    loc = step.location(),
                 );
 
                 // If we can't infer a shell for this `run:`, assume that it's
@@ -475,7 +475,7 @@ impl Audit for GitHubEnv {
 
 #[cfg(test)]
 mod tests {
-    use crate::audit::Audit;
+    use crate::audit::Audit as _;
     use crate::audit::github_env::{GITHUB_ENV_WRITE_CMD, GitHubEnv};
     use crate::state::AuditState;
 

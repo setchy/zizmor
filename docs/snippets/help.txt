@@ -4,7 +4,7 @@ Usage: zizmor [OPTIONS] <INPUT>...
 
 Input Options:
   <INPUT>...               The inputs to audit
-      --collect <KIND>...  Control which kinds of inputs are collected for auditing [default: default] [possible values: all, default, workflows, actions, dependabot]
+      --collect <KIND>...  Control which kinds of inputs are collected for auditing [default: default] [possible values: all, default, workflows, actions, dependabot, pre-commit]
       --strict-collection  Fail instead of warning on syntax and schema errors in collected inputs
 
 Audit Options:
@@ -13,6 +13,7 @@ Audit Options:
       --persona <PERSONA>       The persona to use while auditing [default: regular] [possible values: auditor, pedantic, regular]
       --min-severity <LEVEL>    Filter all results below this severity [possible values: informational, low, medium, high]
       --min-confidence <LEVEL>  Filter all results below this confidence [possible values: low, medium, high]
+      --no-ignores              Don't honor ignore comments or ignore rules in configuration
 
 Output Options:
   -v, --verbose...              Increase logging verbosity

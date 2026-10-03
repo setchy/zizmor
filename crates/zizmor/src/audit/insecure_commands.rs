@@ -1,9 +1,9 @@
-use std::ops::Deref;
+use std::ops::Deref as _;
 
 use github_actions_models::action;
 use github_actions_models::common::Env;
 use github_actions_models::common::expr::LoE;
-use github_actions_models::workflow::job::StepBody;
+use github_actions_models::workflow::job;
 use yamlpatch::{Op, Patch};
 
 use super::{AuditLoadError, Job, audit_meta};
@@ -13,6 +13,7 @@ use crate::finding::location::Locatable as _;
 use crate::finding::{
     Confidence, Finding, Fix, FixDisposition, Persona, Severity, location::SymbolicLocation,
 };
+use crate::models::workflow::StepInner;
 use crate::models::{AsDocument, workflow::Steps, workflow::Workflow};
 use crate::state::AuditState;
 
@@ -55,7 +56,6 @@ impl InsecureCommands {
                 ),
             )
             .build(doc)
-            .map_err(Self::err)
     }
 
     fn insecure_commands_allowed<'s, 'doc>(
@@ -76,12 +76,11 @@ impl InsecureCommands {
             )
             .fix(fix)
             .build(doc)
-            .map_err(Self::err)
     }
 
     fn has_insecure_commands_enabled(&self, env: &Env) -> bool {
         match env.get("ACTIONS_ALLOW_UNSECURE_COMMANDS") {
-            Some(value) => value.csharp_trueish(),
+            Some(value) => value.csharp_bool(),
             None => false,
         }
     }
@@ -94,16 +93,11 @@ impl InsecureCommands {
         steps
             .into_iter()
             .filter_map(|step| {
-                let StepBody::Run {
-                    run: _,
-                    working_directory: _,
-                    shell: _,
-                } = &step.deref().body
-                else {
+                let StepInner::Run(job::RunStep { shared, .. }) = &step.deref() else {
                     return None;
                 };
 
-                match &step.env {
+                match &shared.env {
                     // The entire environment block is an expression, which we
                     // can't follow (for now). Emit an auditor-only finding.
                     LoE::Expr(_) => {
@@ -188,279 +182,5 @@ impl Audit for InsecureCommands {
         }
 
         Ok(findings)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        config::Config,
-        models::{AsDocument, workflow::Workflow},
-        registry::input::InputKey,
-        state::AuditState,
-    };
-
-    /// Macro for testing workflow audits with common boilerplate
-    macro_rules! test_workflow_audit {
-        ($audit_type:ty, $filename:expr, $workflow_content:expr, $test_fn:expr) => {{
-            let key = InputKey::local("fakegroup".into(), $filename, None::<&str>);
-            let workflow = Workflow::from_string($workflow_content.to_string(), key).unwrap();
-            let audit_state = AuditState::default();
-            let audit = <$audit_type>::new(&audit_state).unwrap();
-            let findings = audit
-                .audit_workflow(&workflow, &Config::default())
-                .await
-                .unwrap();
-
-            $test_fn(&workflow, findings)
-        }};
-    }
-
-    #[tokio::test]
-    async fn test_insecure_commands_fix_generation() {
-        let workflow_content = r#"
-on: push
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    env:
-      ACTIONS_ALLOW_UNSECURE_COMMANDS: true
-      OTHER_VAR: keep-me
-    steps:
-      - run: echo "test"
-"#;
-
-        test_workflow_audit!(
-            InsecureCommands,
-            "test_fix.yml",
-            workflow_content,
-            |_workflow: &Workflow, findings: Vec<Finding>| {
-                assert_eq!(findings.len(), 1);
-                let finding = &findings[0];
-                assert_eq!(finding.ident, "insecure-commands");
-                assert_eq!(finding.fixes.len(), 1);
-
-                let fix = &finding.fixes[0];
-                assert_eq!(
-                    fix.title,
-                    "remove ACTIONS_ALLOW_UNSECURE_COMMANDS environment variable"
-                );
-                assert_eq!(fix.patches.len(), 1);
-
-                let patch = &fix.patches[0];
-                assert!(matches!(patch.operation, Op::Remove));
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn test_fix_removes_insecure_commands_preserves_others() {
-        let workflow_content = r#"
-on: push
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    env:
-      ACTIONS_ALLOW_UNSECURE_COMMANDS: true
-      OTHER_VAR: keep-me
-      ANOTHER_VAR: also-keep
-    steps:
-      - run: echo "test"
-"#;
-
-        test_workflow_audit!(
-            InsecureCommands,
-            "test_fix_preserve.yml",
-            workflow_content,
-            |workflow: &Workflow, findings: Vec<Finding>| {
-                assert_eq!(findings.len(), 1);
-                let finding = &findings[0];
-                assert_eq!(finding.fixes.len(), 1);
-
-                let fix = &finding.fixes[0];
-                let fixed_document = fix.apply(workflow.as_document()).unwrap();
-
-                // Check that ACTIONS_ALLOW_UNSECURE_COMMANDS is removed
-                assert!(
-                    !fixed_document
-                        .source()
-                        .contains("ACTIONS_ALLOW_UNSECURE_COMMANDS")
-                );
-
-                // Check that other environment variables are preserved
-                assert!(fixed_document.source().contains("OTHER_VAR: keep-me"));
-                assert!(fixed_document.source().contains("ANOTHER_VAR: also-keep"));
-
-                insta::assert_snapshot!(fixed_document.source(), @r#"
-
-                on: push
-
-                jobs:
-                  test:
-                    runs-on: ubuntu-latest
-                    env:
-                      OTHER_VAR: keep-me
-                      ANOTHER_VAR: also-keep
-                    steps:
-                      - run: echo "test"
-                "#);
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn test_workflow_level_insecure_commands_fix() {
-        let workflow_content = r#"
-on: push
-
-env:
-  ACTIONS_ALLOW_UNSECURE_COMMANDS: true
-  GLOBAL_VAR: keep-me
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "test"
-"#;
-
-        test_workflow_audit!(
-            InsecureCommands,
-            "test_workflow_fix.yml",
-            workflow_content,
-            |workflow: &Workflow, findings: Vec<Finding>| {
-                assert_eq!(findings.len(), 1);
-                let finding = &findings[0];
-                assert_eq!(finding.fixes.len(), 1);
-
-                let fix = &finding.fixes[0];
-                let fixed_document = fix.apply(workflow.as_document()).unwrap();
-
-                // Check that ACTIONS_ALLOW_UNSECURE_COMMANDS is removed at workflow level
-                assert!(
-                    !fixed_document
-                        .source()
-                        .contains("ACTIONS_ALLOW_UNSECURE_COMMANDS")
-                );
-
-                // Check that other workflow-level env vars are preserved
-                assert!(fixed_document.source().contains("GLOBAL_VAR: keep-me"));
-
-                insta::assert_snapshot!(fixed_document.source(), @r#"
-
-                on: push
-
-                env:
-                  GLOBAL_VAR: keep-me
-
-                jobs:
-                  test:
-                    runs-on: ubuntu-latest
-                    steps:
-                      - run: echo "test"
-                "#);
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn test_step_level_insecure_commands_fix() {
-        let workflow_content = r#"
-on: push
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - name: step with insecure commands
-        run: echo "test"
-        env:
-          ACTIONS_ALLOW_UNSECURE_COMMANDS: true
-          STEP_VAR: keep-me
-"#;
-
-        test_workflow_audit!(
-            InsecureCommands,
-            "test_step_fix.yml",
-            workflow_content,
-            |workflow: &Workflow, findings: Vec<Finding>| {
-                assert_eq!(findings.len(), 1);
-                let finding = &findings[0];
-                assert_eq!(finding.fixes.len(), 1);
-
-                let fix = &finding.fixes[0];
-                let fixed_document = fix.apply(workflow.as_document()).unwrap();
-
-                // Check that ACTIONS_ALLOW_UNSECURE_COMMANDS is removed at step level
-                assert!(
-                    !fixed_document
-                        .source()
-                        .contains("ACTIONS_ALLOW_UNSECURE_COMMANDS")
-                );
-
-                // Check that other step-level env vars are preserved
-                assert!(fixed_document.source().contains("STEP_VAR: keep-me"));
-
-                insta::assert_snapshot!(fixed_document.source(), @r#"
-
-                on: push
-
-                jobs:
-                  test:
-                    runs-on: ubuntu-latest
-                    steps:
-                      - name: step with insecure commands
-                        run: echo "test"
-                        env:
-                          STEP_VAR: keep-me
-                "#);
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn test_string_value_insecure_commands_fix() {
-        let workflow_content = r#"
-on: push
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    env:
-      ACTIONS_ALLOW_UNSECURE_COMMANDS: "true"
-      OTHER_VAR: keep-me
-    steps:
-      - run: echo "test"
-"#;
-
-        test_workflow_audit!(
-            InsecureCommands,
-            "test_string_fix.yml",
-            workflow_content,
-            |workflow: &Workflow, findings: Vec<Finding>| {
-                assert_eq!(findings.len(), 1);
-                let finding = &findings[0];
-                assert_eq!(finding.fixes.len(), 1);
-
-                let fix = &finding.fixes[0];
-                let fixed_document = fix.apply(workflow.as_document()).unwrap();
-
-                insta::assert_snapshot!(fixed_document.source(), @r#"
-
-                on: push
-
-                jobs:
-                  test:
-                    runs-on: ubuntu-latest
-                    env:
-                      OTHER_VAR: keep-me
-                    steps:
-                      - run: echo "test"
-                "#);
-            }
-        );
     }
 }

@@ -1,8 +1,9 @@
-use std::ops::Deref;
+use std::ops::Deref as _;
 
 use github_actions_expressions::{
     Expr, SpannedExpr,
     call::{Call, Function},
+    op::BinExpr,
 };
 
 use crate::{
@@ -39,6 +40,10 @@ impl Audit for OverprovisionedSecrets {
         _config: &crate::config::Config,
     ) -> Result<Vec<super::Finding<'doc>>, AuditError> {
         let mut findings = vec![];
+
+        if !input.supports_gha_template_syntax() {
+            return Ok(findings);
+        }
 
         for (expr, span) in parse_fenced_expressions_from_routable(input) {
             let Ok(parsed) = Expr::parse(expr.as_bare()) else {
@@ -107,11 +112,11 @@ impl OverprovisionedSecrets {
                     _ => results.extend(ctx.parts.iter().flat_map(Self::secrets_expansions)),
                 }
             }
-            Expr::BinOp { lhs, op: _, rhs } => {
+            Expr::BinExpr(BinExpr { lhs, op: _, rhs }) => {
                 results.extend(Self::secrets_expansions(lhs));
                 results.extend(Self::secrets_expansions(rhs));
             }
-            Expr::UnOp { op: _, expr } => results.extend(Self::secrets_expansions(expr)),
+            Expr::UnExpr { op: _, expr } => results.extend(Self::secrets_expansions(expr)),
             _ => (),
         }
 

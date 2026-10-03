@@ -1,6 +1,5 @@
 //! Subfeature handling and manipulation APIs.
 
-#![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 use std::sync::LazyLock;
@@ -153,6 +152,8 @@ impl<'a> Subfeature<'a> {
     /// can't be found. The returned span is relative to the feature's
     /// start.
     pub fn locate_within(&self, feature: &str) -> Option<Span> {
+        tracing::debug!("attempting to locate {self:?} within {feature:?}");
+
         // NOTE: Our inputs are always valid UTF-8 but `after` may not
         // be a valid UTF-8 codepoint index, so everything below operates
         // on a byte slice.

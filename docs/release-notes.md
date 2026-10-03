@@ -9,6 +9,454 @@ of `zizmor`.
 
 ## Next (UNRELEASED)
 
+### Enhancements 🌱
+
+* The [self-hosted-runner] audit is now significantly more precise (#2350)
+
+    Many thanks to @ubiratansoares for proposing and implementing this enhancement!
+
+* The [dangerous-triggers] audit now considers the `issue_comment` trigger
+  fundamentally dangerous (#2396)
+
+* zizmor is now aware of the `image_version` workflow trigger (#2397)
+
+* The [dangerous-triggers] audit now produces more precise finding/diagnostic spans (#2402)
+
+* The [cache-poisoning] audit is now aware of @pnpm/setup (#2409)
+
+* The [unpinned-images] audit now produces more precise findings when the user's
+  workflow contains an indirect matrix (#2395)
+
+    Many thanks to @ubiratansoares for proposing and implementing this enhancement!
+
+* The [cache-poisoning] audit is now aware of GitHub's new `#!yaml cache-mode:` setting,
+  and will skip any findings that would occur when a job has an effective `#!yaml cache-mode: none`
+  (#2418)
+
+* The [cache-poisoning] audit now flags usages of `#!yaml cache-mode: write` and
+  `#!yaml cache-mode: write-only` with dangerous triggers, i.e. triggers that give
+  an attacker privileged code execution (#2426)
+
+### Bug Fixes 🐛
+
+* Fixed a class of false positives/imprecisions in [adhoc-packages] that caused
+  some `pnpm` and `yarn` invocations to be misclassified as package installations (#2386)
+
+    Many thanks to @marcalexiei for implementing this improvement!
+
+* Fixed a bug where `zizmor` would fail to honor Git submodules and worktrees
+  when discovering configuration files relative to a repo root (#2390)
+
+* Fixed a bug where the [ref-version-mismatch] audit would crash on
+  unusually placed version comments (#2394)
+
+* Fixed a bug where `zizmor` would fail to handle some pre-commit inputs
+  that use prek extensions to the `language_version` and `default_language_version`
+  keys (#2413)
+
+## 1.30.1
+
+### Bug Fixes 🐛
+
+* Fixed a bug where `zizmor` would crash on pre-commit inputs that reference
+  a GitHub URL with an explicit `.git` suffix (#2363)
+
+* Fixed a bug where [self-repository] auto-fixes were incorrectly marked as
+  "safe" instead of "unsafe" (#2373)
+
+## 1.30.0
+
+### New Features 🌈
+
+* **New audit**: [self-repository] detects usages of the old "workspace-relative"
+  form for local reusable workflows and actions and recommends the new "self-repository"
+  form instead (#2271)
+
+### Enhancements 🌱
+
+* The [impostor-commit] audit now supports pre-commit config inputs (#2256)
+
+* The [forbidden-uses] audit now supports pre-commit config inputs (#2263)
+
+* The [adhoc-packages] audit now detects more ad-hoc package management patterns,
+  including `bundle add` and `yarn add`
+
+    Many thanks to @connorshea for proposing and implementing this enhancement!
+
+* The [archived-uses] audit now supports pre-commit config inputs (#2272)
+
+* The [ref-confusion] audit now supports pre-commit config inputs (#2274)
+
+* The [cache-poisoning] audit now produces more detailed and more precise diagnostics (#2330)
+
+* The [cache-poisoning] audit now handles and exposes auto-fixes in a more general manner (#2332)
+
+* zizmor now recognizes @sethvargo/ratchet version comments when evaluating ref pinning (#2319)
+
+    Many thanks to @njgudman for proposing and implementing this enhancement!
+
+* The [unpinned-tools] audit now produces more detailed and more precise diagnostics (#2339)
+
+* The [unpinned-tools] audit now detects usages of @extractions/setup-just (#2339)
+
+* The [unpinned-tools] audit now detects usages of @extractions/setup-crate (#2340)
+
+* The [archived-uses] audit now detects several more archived repositories (#2340)
+
+* The [ref-version-mismatch] audit now supports `#!yaml uses:` that reference
+  reusable workflows (#2344)
+
+* The [stale-action-refs] audit now supports `#!yaml uses:` that reference
+  reusable workflows (#2345)
+
+### Bug Fixes 🐛
+
+* Fixed a bug where `zizmor` would reject a `.pre-commit-config.yml`
+  input containing a `prek`-specific `builtin` section (#2259)
+
+* Fixed a bug where the [unpinned-uses] audit would fail to honor
+  ignore comments within the same step scope (#2289)
+
+* Fixed a bug where `zizmor` would reject a `dependabot.yml` containing
+  a `goproxy-server` registry definition (#2300)
+
+* Fixed a bug where `zizmor` would reject pre-commit configurations containing
+  `prek`-specific glob patterns in `files` or `exclude` (#2308)
+
+* Fixed a handful of unsound patch bugs when performing YAML add and/or
+  replace operations (#2295)
+
+    Many thanks to @dmbuil for proposing and implementing this improvement!
+
+* Fixed a bug where the [cache-poisoning] audit would incorrectly flag
+  newer @astral-sh/setup-uv versions that disable caching behavior automatically (#2330)
+
+* Fixed a bug where the [ref-version-mismatch] audit would produce a misleading
+  diagnostic when an action has overlapping branch and tag names (#2337)
+
+* Fixed a bug where the [artipacked] audit would incorrectly flag the `#!yaml with:`
+  clauses of unrelated actions (#2339)
+
+* Fixed a class of bugs where zizmor would incorrectly match an action's commit to a sibling
+  action's tag (#2247)
+
+    Many thanks to @potiuk for proposing and implementing this improvement!
+
+* Fixed a bug where zizmor would crash on deeply nested GitHub Actions expressions (#2349)
+
+## 1.29.0
+
+### New Features 🌈
+
+* zizmor now has **experimental** support for auditing pre-commit inputs,
+  meaning both pre-commit configuration and hook definitions (#2209)
+
+* **New audit**: [insecure-url-scheme] detects usages of insecure (i.e. plaintext)
+  protocols when making network requests. The initial version of this audit
+  is limited to pre-commit inputs only (#2228)
+
+* zizmor now supports GitHub's "self-repository" reference syntax for local
+  actions, e.g. `#!yaml uses: $/foo/bar` instead of a manual checkout and
+  `#!yaml uses: ./foo/bar` (#2248)
+
+### Changes ⚠️
+
+* The [unpinned-uses] and [unpinned-images] audits have been separated more cleanly:
+  [unpinned-uses] is now principally responsible for Git-style `#!yaml uses:` clauses,
+  whereas [unpinned-images] is now responsible for `docker://`-style `#!yaml uses:` clauses
+  (in addition to already checking other image references) (#2222)
+
+### Removals 🌅
+
+* `--collect=workflows-only` and `--collect=actions-only` have been fully removed.
+  Use `--collect=workflows` and `--collect=actions` for the replacement behavior
+  (#2242)
+
+### Bug Fixes 🐛
+
+* Fixed a bug where `zizmor` would reject a valid workflow definition for
+  containing a literal `jobs.<job>.outputs.<name>` value for being a non-string (#2220)
+
+* Fixed a bug where the [github-app] audit would incorrectly flag some usages
+  as needing a `#!yaml repositories:` key, despite requesting organization-level-only
+  permissions (#2227)
+
+* Fixed a class of bugs where `zizmor` would discover the user's configuration in
+  unintuitive ways. When auditing from a Git repository, `zizmor` now uses the repository
+  root to discover configuration consistently (#2234)
+
+## 1.28.0
+
+### Security 🔒
+
+* `v1.27.0` contained a logging defect that would print any configured GitHub
+  credentials as part of zizmor's cleartext logging. No versions other than
+  `v1.27.0` were affected. See [GHSA-f42p-wjw5-97qh] for full information.
+
+    Many thanks to @shaanmajid for finding and reporting this vulnerability.
+
+### Enhancements 🌱
+
+* The JSON (v1) output format now includes metadata for each finding's fixes,
+  if the finding has fixes (#2186)
+
+* The [dependabot-cooldown] audit is now aware of GitHub's new three-day default
+  cooldown (#2193)
+
+* `sbt` is now recognized as a `package-ecosystem` in `dependabot.yml` (#2211)
+
+### Bug Fixes 🐛
+
+* Fixed a bug where the [template-injection] audit would incorrectly flag
+  `steps.*.outcome` and `steps.*.conclusion` as injection risks in the default persona
+  (#2199)
+
+* Fixed a bug where the [github-env] audit would incorrectly flag some `printf`
+  calls as exploitable (#2201)
+
+* Fixed a bug where `zizmor` would produce a misleading and confusing error
+  message when asked to audit an ambiguous remote input (#2205)
+
+## 1.27.0
+
+### New Features 🌈
+
+* zizmor now has **experimental** support for workflows that
+  specify parallel steps. See [Usage - Parallel steps](./usage.md#parallel-steps)
+  for more information (#2153)
+
+### Enhancements 🌱
+
+* zizmor's handling of paths is now more consistent, particularly
+  when run on Windows (#2163)
+
+* zizmor now emits a helpful warning when being run in implicit offline mode (#2180)
+
+### Bug Fixes 🐛
+
+* Fixed a bug where the [secrets-outside-env] audit would not honor
+  ignore comments within the same job scope (#2158)
+
+* Fixed a bug where the [ref-version-mismatch] audit would not honor
+  ignore comments within the same steps scope (#2177)
+
+* Fixed a bug where `--collect=[MODE]` was not correctly handled
+  when auditing remote inputs (#2185)
+
+## 1.26.1
+
+This is a small corrective release for [1.26.0](#1260).
+
+## 1.26.0
+
+### New Features 🌈
+
+* **New audit**: [typosquat-uses] detects `#!yaml uses:` clauses that reference likely
+  typoed actions (#1985)
+
+    Many thanks to @andrew for proposing and implementing this improvement!
+
+* **New audit**: [unsound-ternary] detects pseudo-ternary expressions that
+  don't evaluate as expected (#2085)
+
+    Many thanks to @terror for proposing and implementing this improvement!
+
+* **New audit**: [adhoc-packages] detects `#!yaml run:` steps that install packages
+  in an ad-hoc manner (#2061)
+
+    Many thanks to @connorshea for proposing and implementing this improvement!
+
+### Enhancements 🌱
+
+* The [cache-poisoning] audit now detects additional cache disablement
+  heuristics (#2053)
+
+* The [known-vulnerable-actions] audit is now configurable.
+  See [the configuration documentation](./audits.md#known-vulnerable-actions-configuration)
+  for details (#2084)
+
+* The [excessive-permissions] audit is now aware of the `code-quality` permission (#2088)
+
+* The [unpinned-uses] audit's auto-fix now uses the fully qualified version tag
+  (e.g. `# v6.0.2`) when fixing a major-version ref (e.g. `@v6`) (#2127)
+
+### Performance Improvements 🚄
+
+* Most online audits are significantly faster, thanks to more precise retry handling (#2036)
+
+### Bug Fixes 🐛
+
+* Fixed a bug where zizmor's LSP would not recognize `dependabot.yaml`
+  files in its default configuration (#2026)
+
+    Many thanks to @fionn for implementing this fix!
+
+* Fixed a bug where [ref-version-mismatch] would fail to fully match some
+  version comments (#2040)
+
+* Fixed a bug where [dependabot-cooldown] would fail to honor the user's
+  configured days when performing autofixes (#2055)
+
+* Steps and jobs gated by statically-false `if:` conditions (e.g. `if: false`,
+  `if: ${{ false }}`) are now skipped during auditing, since they cannot
+  execute (#2059, #2069)
+
+* Fixed a bug where [ref-version-mismatch] would fail to identify some valid
+  version comments (#2073)
+
+* Fixed a bug where [unpinned-images] would incorrectly flag empty matrix
+  expansions as unpinned container image references (#2102)
+
+* Fixed a bug where [unpinned-images] would incorrectly flag some `matrix`
+  expansions as unpinned (#2098)
+
+* The SARIF (`--format=sarif`) and GitHub Annotations (`--format=github`)
+  output formats now provide more correct/useful paths, particularly when
+  the user provides a relative path as input to `zizmor` rather than
+  `zizmor .` (#1748, #2095)
+
+### Changes ⚠️
+
+* The [impostor-commit] audit no longer suggests auto-fixes,
+  to avoid incorrectly minimizing the amount of manual remediation
+  work needed (#2054)
+
+* The JSON and SARIF outputs no longer contain a misleading `prefix`
+  key (#2095)
+
+## 1.25.2
+
+### Bug Fixes 🐛
+
+* Fixed a bug where the [unpinned-tools] audit would incorrectly flag the
+  @aquasecurity/trivy-action action as installing an unpinned tool version,
+  rather than @aquasecurity/setup-trivy (#2018)
+
+## 1.25.1
+
+### Bug Fixes 🐛
+
+* Fixed a bug where the [cache-poisoning] audit would fail to consider
+  `release` events as exempt from cache usage findings when filtered by a
+  tag condition (#2004)
+
+* Fixed a typo when suggesting `--fix` flags for findings (#2010)
+
+    Many thanks to @0xdea for implementing this fix!
+
+* Fixed a typo in [unpinned-tools] annotations (#2008)
+
+    Many thanks to @martincostello for implementing this fix!
+
+* Fixed a bug where the [github-app] audit would incorrectly flag some safe
+  uses of @actions/create-github-app-token as unsafe (#2011)
+
+## 1.25.0
+
+### New Features 🌈
+
+* zizmor's finding severities can now be remapped on a per-audit basis.
+  See [the configuration](./configuration.md#rules-id-remap) for details (#1913)
+
+    Many thanks to @Proximyst for proposing and implementing this improvement!
+
+* **New audit**: [github-app] detects dangerous usages of GitHub App installation tokens
+  (#1926)
+
+* **New audit**: [unpinned-tools] detects actions that install tools without pinning
+  to a specific version (#1820)
+
+* `zizmor` now accepts the `--no-ignores` flag to disable all ignore comments and
+  configurations when reporting findings (#1935)
+
+* `zizmor`'s LSP now honors the `--persona` flag on the CLI (#1943)
+
+* `zizmor` is now aware of Docker-based action definitions, in addition to the
+  pre-existing support for "composite" actions (#1965)
+
+### Enhancements
+
+* Recommend `gh issue edit --add-label` / `gh pr edit --add-label` as a replacement for
+  @actions-ecosystem/action-add-labels in [superfluous-actions]
+
+* Recommend `gh issue edit --remove-label` / `gh pr edit --remove-label` as a replacement for
+  @actions-ecosystem/action-remove-labels in [superfluous-actions]
+
+* Recommend `jq` as a replacement for @sergeysova/jq-action in [superfluous-actions]
+
+* Recommend `git add`, `git commit`, and `git push` as a replacement for
+  @stefanzweifel/git-auto-commit-action in [superfluous-actions]
+
+* Recommend `git add`, `git commit`, and `git push` as a replacement for
+  @EndBug/add-and-commit in [superfluous-actions]
+
+* @tibdex/github-app-token is now recognized as an archived action by
+  [archived-uses] (#1910)
+
+* The [dangerous-triggers] audit now explicitly exempts workflows that only
+  invoke @actions/labeler (#1956)
+
+* The [unpinned-images] audit now detects unpinned image references in
+  Docker-based action definitions (#1965)
+
+* zizmor's SARIF output now provides slightly more detailed finding messages
+  (#1972)
+
+* The [archived-uses] audit now detects more archived actions (#1978)
+
+* `deno` is now recognized as a `package-ecosystem` in `dependabot.yml` (#1991)
+
+### Performance Improvements 🚄
+
+* The [impostor-commit] audit is now significantly faster (in addition to being
+  more correct) when the user has pinned their action to a tag SHA instead of
+  a commit SHA (#1998)
+
+### Bug Fixes 🐛
+
+* Fixed a crash in the [template-injection] audit when a workflow uses
+  a parenthesized compound expression in context position (#1904)
+
+* Fixed a bug where local directory input collection could miss workflows for
+  relative-path invocations from within `.github` subdirectories (#1909)
+
+* Fixed a bug where the [unpinned-images] audit would miss images defined
+  in `container: <image>` clauses (#1944)
+
+* Fixed a bug where inline ignore comments could not be easily applied
+  to [superfluous-actions] findings (#1945)
+
+* Fixed a bug where the [cache-poisoning] audit would fail to detect
+  some release trigger patterns (#1946)
+
+* Fixed a bug where inline ignore comments could not be easily applied
+  to [cache-poisoning] findings (#1962)
+
+* Fixed a class of imprecisions where the [cache-poisoning] audit would
+  incorrectly flag cache usage that doesn't actually occur on release events
+  (#1940)
+
+    Many thanks to @reubenwong97 for implementing this fix!
+
+* Fixed a bug where `dependabot.yml` files containing a private cargo
+  repository couldn't be parsed (#1974)
+
+* Fixed a bug where zizmor's input validation warnings lacked
+  a mention of which files failed to validate (#1980)
+
+* Fixed a bug where the [impostor-commit] audit would falsely indicate
+  impostor commits if an action was pinned to a tag SHA instead of a commit SHA
+  (#1998)
+
+## 1.24.1
+
+### Bug Fixes 🐛
+
+* Fixed a bug where the [ref-version-mismatch] audit would incorrectly flag
+  some version comments as not containing an appropriate version (#1900)
+
+## 1.24.0
+
 ### New Features 🌈
 
 * `zizmor` now allows users to audit from stdin, by passing `zizmor -` (#1611)
@@ -36,6 +484,9 @@ of `zizmor`.
 * Recommend `gh release upload` as a replacement for @svenstaro/upload-release-action in
   [superfluous-actions] (#1801)
 
+* Recommend `gh issue create` as a replacement for @dacbd/create-issue-action in
+  [superfluous-actions] (#1873)
+
 * The [obfuscation] audit now emits a finding for `with: ${{ expr }}`
   clauses cannot be analyzed (#1772)
 
@@ -49,10 +500,20 @@ of `zizmor`.
 * The [ref-version-mismatch] audit now uses a more useful audit description
   for its findings (#1843)
 
+* The [unpinned-images] audit now produces more precise findings for
+  image references that are computed through expressions (#1756)
+
+    Many thanks to @miketheman for implementing this improvement!
+
+* The [ref-version-mismatch] audit now detects missing version comments as well
+  (#1849)
+
+    Many thanks to @shaanmajid for proposing and implementing this improvement!
+
 ### Bug Fixes 🐛
 
 * Fixed a bug where the [concurrency-limits] audit reported findings
-  at the job level instead of the workflow level (#1627)
+  at the job level instead of the workflow level (#1793)
 
 * Fixed a bug where `with: ${{ expr }}` clauses would cause a crash.
   `artipacked` audit emits a pedantic finding on such clauses. (#1772)
@@ -65,7 +526,8 @@ of `zizmor`.
 
 * Fixed a bug where expressions containing `Infinity` or `NaN` would fail to parse (#1778)
 
-* Fixed a bug where some parenthetical forms in expressions would fail to parse (#1779)
+* Fixed several bugs where some parenthetical forms in expressions would fail to parse
+  (#1779, #1856)
 
 * Fixed a bug where expressions with invalid identifiers (such as `-Inf`) would
   be incorrectly accepted (#1794)
@@ -79,6 +541,28 @@ of `zizmor`.
 * Fixed a bug where the [unpinned-uses] audit would product incorrect auto-fixes
   for actions with subpaths (#1841)
 
+* Fixed a bug where the [ref-version-mismatch] audit would fail to produce
+  findings for comments containing nonexistent refs (#1853)
+
+* Fixed a bug where expressions containing `NaN` would be constant-evaluated
+  incorrectly (#1858)
+
+* Fixed a bug where `nix` would not be recognized as a `package-ecosystem` in
+  `dependabot.yml` (#1867)
+
+* Fixed a bug where the [ref-version-mismatch] audit would incorrectly parse
+  prerelease version comments (such as `# v6-beta`), causing some findings
+  to appear unresolvable (#1871)
+
+* Fixed a bug where various string comparisons in expressions did not perfectly
+  match GitHub's own special uppercasing semantics (#1879)
+
+* Fixed a bug where zizmor would incorrectly contact `github.com` instead
+  of the user's requested `--gh-hostname` for some online requests (#1874)
+
+* Fixed a bug where the [artipacked] audit would fail to honor the
+  `--no-online-audits` flag (#1874)
+
 ### Changes ⚠️
 
 * The [secrets-outside-env] audit now only flags findings with the 'auditor'
@@ -91,8 +575,14 @@ of `zizmor`.
   arities (#1823, #1826)
 
 * The [superfluous-actions] audit now uses the "pedantic" persona for some
-  findings along with a low confidence marker to signal when a action
-  may not be easily replaced with built-in functionality (#1822)
+  findings along with a medium or low confidence marker to signal when a action
+  may not be easily replaced with built-in functionality (#1822, #1859)
+
+* The [unpinned-uses] audit no longer suggests auto-fixes for Git references
+  that don't look like version tags, such as `main` (#1860)
+
+* The [template-injection] audit now considers more "URL-shaped" contexts
+  to be fully attacker-controllable, rather than partially controllable (#1868)
 
 ## 1.23.1
 
@@ -272,7 +762,7 @@ of `zizmor`.
 
     Users who with to retain the old (permissive policy) for first-party
     actions may configure it explicitly in their `zizmor.yml`:
-  
+
     ```yaml title="zizmor.yml"
     rules:
       unpinned-uses:
@@ -314,21 +804,21 @@ of `zizmor`.
 * The [use-trusted-publishing] audit now detects additional publishing command
   patterns, including common "wrapped" patterns like `bundle exec gem publish`
   (#1394)
-  
+
 * zizmor now produces better error messages on a handful of error cases involving
   invalid input files. Specifically, a subset of syntax and schema errors now
   produce more detailed and actionable error messages (#1396)
-  
+
 * The [use-trusted-publishing] audit now detects additional publishing command
   patterns, including `uv run ...`, `uvx ...`, and `poetry publish`
   (#1402)
-  
+
 * zizmor now produces more useful and less ambiguous spans for many findings,
   particularly those from the [anonymous-definition] audit (#1416)
-  
+
 * zizmor now discovers configuration files named `zizmor.yaml`, in addition
   to `zizmor.yml` (#1431)
-  
+
 * zizmor now produces a more useful error message when input collection
   yields no inputs (#1439)
 
@@ -336,7 +826,7 @@ of `zizmor`.
   link rendering behavior. This is particularly useful in environments that
   advertise themselves as terminals but fail to correctly render or ignore
   OSC 8 links (#1454)
- 
+
 ### Performance Improvements 🚄
 
 * The [impostor-commit] audit is now significantly faster on true positives,
@@ -347,9 +837,9 @@ of `zizmor`.
 ### Bug Fixes 🐛
 
 * Fixed a bug where the [obfuscation] audit would crash if it encountered
-  a CMD shell that was defined outside of the current step block (i.e. 
+  a CMD shell that was defined outside of the current step block (i.e.
   as a job or workflow default) (#1418)
-  
+
 * Fixed a bug where the `opentofu` ecosystem was not recognized in
   Dependabot configuration files (#1452)
 
@@ -363,14 +853,14 @@ of `zizmor`.
 
 * The [use-trusted-publishing] audit now detects NuGet publishing commands
   (#1369)
-  
+
 * The [dependabot-cooldown] audit now flags cooldown periods of less than 7
   days by default (#1375)
-  
+
 * The [dependabot-cooldown] audit can now be configured with a custom
   minimum cooldown period via `rules.dependabot-cooldown.config.days`
   (#1377)
-  
+
 * `zizmor` now produces slightly more useful error messages when the user supplies
   an invalid configuration for the [forbidden-uses] audit (#1381)
 
@@ -385,10 +875,10 @@ of `zizmor`.
 
 * `zizmor` now produces a more useful error message when asked to
   collect only workflows from a remote input that contains no workflows (#1324)
-  
+
 * `zizmor` now produces more precise severities on @actions/checkout versions
   that have more misuse-resistant credentials persistence behavior (#1353)
-  
+
     Many thanks to @ManuelLerchnerQC for proposing and implementing this improvement!
 
 * The [use-trusted-publishing] audit now correctly detecting more "dry-run"
@@ -415,7 +905,7 @@ of `zizmor`.
 
 * The [github-env] audit now falls back to assuming bash-like shell syntax in
   `run:` blocks if it can't infer the shell being used (#1336)
-  
+
 * The [concurrency-limits] audit now correctly detects job-level `concurrency`
   settings, in addition to workflow-level settings (#1338)
 
@@ -675,7 +1165,7 @@ To complement this new functionality, this release comes with two new audits:
     detailed explanation of the new behavior.
 
 * Audit rules can now be disabled entirely in `zizmor`'s configuration.
-  See [`rules.<id>.disable`](./configuration.md#rulesiddisable)
+  See [`rules.<id>.disable`](./configuration.md#rules-id-disable)
   for details (#1132)
 
 * The [obfuscation] audit now supports auto-fixes for many findings (#1088)
@@ -1018,7 +1508,7 @@ from remote repositories.
 
 ### Upcoming Changes 🚧
 
-* The official [PyPI builds](./installation.md#pypi) for `zizmor`
+* The official [PyPI builds](./installation.md#pypi-pypi) for `zizmor`
   will support fewer architectures in the next release, due to
   cross-compilation and testing difficulties. This should have
   **no effect** on the overwhelming majority of users.
@@ -1618,11 +2108,12 @@ This is one of `zizmor`'s bigger recent releases! Key enhancements include:
 ### New Contributors
 * @hugovk made their first contribution in #61
 
-<!-- useful shortlinks -->
+<!-- audit shortlinks -->
 
 [artipacked]: ./audits.md#artipacked
 [excessive-permissions]: ./audits.md#excessive-permissions
 [cache-poisoning]: ./audits.md#cache-poisoning
+[dangerous-triggers]: ./audits.md#dangerous-triggers
 [github-env]: ./audits.md#github-env
 [template-injection]: ./audits.md#template-injection
 [secrets-inherit]: ./audits.md#secrets-inherit
@@ -1650,5 +2141,18 @@ This is one of `zizmor`'s bigger recent releases! Key enhancements include:
 [misfeature]: ./audits.md#misfeature
 [secrets-outside-env]: ./audits.md#secrets-outside-env
 [superfluous-actions]: ./audits.md#superfluous-actions
+[github-app]: ./audits.md#github-app
+[unpinned-tools]: ./audits.md#unpinned-tools
+[typosquat-uses]: ./audits.md#typosquat-uses
+[unsound-ternary]: ./audits.md#unsound-ternary
+[adhoc-packages]: ./audits.md#adhoc-packages
+[insecure-url-scheme]: ./audits.md#insecure-url-scheme
+[self-repository]: ./audits.md#self-repository
+[ref-confusion]: ./audits.md#ref-confusion
+[self-hosted-runner]: ./audits.md#self-hosted-runner
 
 [exit code]: ./usage.md#exit-codes
+
+<!-- advisories -->
+
+[GHSA-f42p-wjw5-97qh]: https://github.com/zizmorcore/zizmor/security/advisories/GHSA-f42p-wjw5-97qh

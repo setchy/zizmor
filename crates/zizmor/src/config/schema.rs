@@ -12,8 +12,8 @@
 use schemars::JsonSchema;
 
 use super::{
-    DependabotCooldownConfig, ForbiddenUsesConfig, SecretsOutsideEnvConfig, UnpinnedUsesConfig,
-    WorkflowRule,
+    DependabotCooldownConfig, ForbiddenUsesConfig, KnownVulnerableActionsConfig, RemapConfig,
+    SecretsOutsideEnvConfig, SelfHostedRunnerConfig, UnpinnedUsesConfig, WorkflowRule,
 };
 
 /// Base configuration for all audit rules.
@@ -25,6 +25,9 @@ struct BaseRuleConfig {
 
     #[serde(default)]
     ignore: Vec<WorkflowRule>,
+
+    #[serde(default)]
+    remap: Option<RemapConfig>,
 }
 
 /// Configuration for the `dependabot-cooldown` audit.
@@ -49,6 +52,17 @@ struct ForbiddenUsesRuleConfig {
     config: Option<ForbiddenUsesConfig>,
 }
 
+/// Configuration for the `self-hosted-runner` audit.
+#[derive(Clone, Debug, Default, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SelfHostedRunnerRuleConfig {
+    #[serde(flatten)]
+    base: BaseRuleConfig,
+
+    #[serde(default)]
+    config: Option<SelfHostedRunnerConfig>,
+}
+
 /// Configuration for the `secrets-outside-env` audit.
 #[derive(Clone, Debug, Default, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -69,6 +83,17 @@ struct UnpinnedUsesRuleConfig {
 
     #[serde(default)]
     config: UnpinnedUsesConfig,
+}
+
+/// Configuration for the `known-vulnerable-actions` audit.
+#[derive(Debug, Default, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct KnownVulnerableActionsRuleConfig {
+    #[serde(flatten)]
+    base: BaseRuleConfig,
+
+    #[serde(default)]
+    config: Option<KnownVulnerableActionsConfig>,
 }
 
 macro_rules! define_audit_rules {
@@ -93,6 +118,7 @@ macro_rules! define_audit_rules {
 define_audit_rules! {
     artipacked,
     unsound_contains,
+    unsound_ternary,
     excessive_permissions,
     dangerous_triggers,
     impostor_commit,
@@ -100,8 +126,6 @@ define_audit_rules! {
     use_trusted_publishing,
     template_injection,
     hardcoded_container_credentials,
-    self_hosted_runner,
-    known_vulnerable_actions,
     undocumented_permissions,
     insecure_commands,
     github_env,
@@ -119,13 +143,21 @@ define_audit_rules! {
     dependabot_execution,
     concurrency_limits,
     archived_uses,
+    typosquat_uses,
     misfeature,
-    superfluous_actions;
+    superfluous_actions,
+    github_app,
+    unpinned_tools,
+    adhoc_packages,
+    insecure_url_scheme,
+    self_repository;
 
     [DependabotCooldownRuleConfig] dependabot_cooldown,
     [ForbiddenUsesRuleConfig] forbidden_uses,
+    [SelfHostedRunnerRuleConfig] self_hosted_runner,
     [SecretsOutsideEnvRuleConfig] secrets_outside_env,
     [UnpinnedUsesRuleConfig] unpinned_uses,
+    [KnownVulnerableActionsRuleConfig] known_vulnerable_actions,
 }
 
 /// # zizmor's configuration
@@ -159,7 +191,7 @@ mod tests {
     #[test]
     fn test_empty_rules() {
         let empty = "rules: {}";
-        let instance = serde_yaml::from_str::<serde_json::Value>(empty).unwrap();
+        let instance = yaml_serde::from_str::<serde_json::Value>(empty).unwrap();
 
         SCHEMA_VALIDATOR
             .validate(&instance)
@@ -176,7 +208,7 @@ mod tests {
           unpinned-uses:
             disable: false
         "#;
-        let instance = serde_yaml::from_str::<serde_json::Value>(disabled).unwrap();
+        let instance = yaml_serde::from_str::<serde_json::Value>(disabled).unwrap();
 
         SCHEMA_VALIDATOR
             .validate(&instance)
@@ -193,7 +225,7 @@ mod tests {
               - foo.yml:10
               - foo.yml:10:20
         "#;
-        let instance = serde_yaml::from_str::<serde_json::Value>(ignore).unwrap();
+        let instance = yaml_serde::from_str::<serde_json::Value>(ignore).unwrap();
 
         SCHEMA_VALIDATOR
             .validate(&instance)
@@ -206,12 +238,11 @@ mod tests {
             ignore:
               - foo.yml:invalid
         "#;
-        let instance = serde_yaml::from_str::<serde_json::Value>(invalid_ignore).unwrap();
-        let errors = SCHEMA_VALIDATOR.iter_errors(&instance).into_errors();
-        insta::assert_snapshot!(errors, @r#"
-        Validation errors:
-        01: "foo.yml:invalid" does not match "^[^:]+\.ya?ml(:[1-9][0-9]*)?(:[1-9][0-9]*)?$"
-        "#);
+        let instance = yaml_serde::from_str::<serde_json::Value>(invalid_ignore).unwrap();
+        let error = SCHEMA_VALIDATOR
+            .validate(&instance)
+            .expect_err("invalid workflow rule should be rejected");
+        insta::assert_snapshot!(error, @r#""foo.yml:invalid" does not match "^[^:]+\.ya?ml(:[1-9][0-9]*)?(:[1-9][0-9]*)?$""#);
     }
 
     #[test]
@@ -221,7 +252,7 @@ mod tests {
           this-audit-does-not-exist:
             disable: false
         "#;
-        let instance = serde_yaml::from_str::<serde_json::Value>(unknown_audit).unwrap();
+        let instance = yaml_serde::from_str::<serde_json::Value>(unknown_audit).unwrap();
 
         let result = SCHEMA_VALIDATOR.validate(&instance);
         assert!(result.is_err(), "unknown audit should be invalid");
@@ -238,7 +269,7 @@ mod tests {
                 - actions/setup-node@v3
                 - foo/*
         "#;
-        let instance = serde_yaml::from_str::<serde_json::Value>(forbidden_uses_allow).unwrap();
+        let instance = yaml_serde::from_str::<serde_json::Value>(forbidden_uses_allow).unwrap();
 
         SCHEMA_VALIDATOR
             .validate(&instance)
@@ -253,7 +284,7 @@ mod tests {
                 - actions/setup-node@v1
                 - foo/*
         "#;
-        let instance = serde_yaml::from_str::<serde_json::Value>(forbidden_uses_deny).unwrap();
+        let instance = yaml_serde::from_str::<serde_json::Value>(forbidden_uses_deny).unwrap();
 
         SCHEMA_VALIDATOR
             .validate(&instance)
@@ -271,7 +302,7 @@ mod tests {
                 - ALSO_NOT_SO_SECRET
         "#;
 
-        let instance = serde_yaml::from_str::<serde_json::Value>(secrets_allow).unwrap();
+        let instance = yaml_serde::from_str::<serde_json::Value>(secrets_allow).unwrap();
         SCHEMA_VALIDATOR
             .validate(&instance)
             .expect("secrets-outside-env allow config should be valid");
@@ -289,7 +320,7 @@ mod tests {
               - foo.yml
         "#;
 
-        let instance = serde_yaml::from_str::<serde_json::Value>(secrets_allow).unwrap();
+        let instance = yaml_serde::from_str::<serde_json::Value>(secrets_allow).unwrap();
         SCHEMA_VALIDATOR
             .validate(&instance)
             .expect("secrets-outside-env allow config with base config should be valid");
@@ -304,7 +335,7 @@ mod tests {
               policies:
                 actions/checkout: hash-pin
         "#;
-        let instance = serde_yaml::from_str::<serde_json::Value>(valid).unwrap();
+        let instance = yaml_serde::from_str::<serde_json::Value>(valid).unwrap();
         SCHEMA_VALIDATOR
             .validate(&instance)
             .expect("unpinned uses config should be valid");
@@ -316,11 +347,31 @@ mod tests {
               policies:
                 actions/checkout: unknown-policy
         "#;
-        let instance = serde_yaml::from_str::<serde_json::Value>(unknown_policy).unwrap();
-        let errors = SCHEMA_VALIDATOR.iter_errors(&instance).into_errors();
-        insta::assert_snapshot!(errors, @r#"
-        Validation errors:
-        01: "unknown-policy" is not valid under any of the schemas listed in the 'oneOf' keyword
-        "#);
+        let instance = yaml_serde::from_str::<serde_json::Value>(unknown_policy).unwrap();
+        let error = SCHEMA_VALIDATOR
+            .validate(&instance)
+            .expect_err("unknown pinning policy should be rejected");
+        insta::assert_snapshot!(error, @r#""unknown-policy" is not valid under any of the schemas listed in the 'oneOf' keyword"#);
+    }
+
+    #[test]
+    fn test_remap_severity() {
+        for sev in ["informational", "low", "medium", "high"] {
+            let yaml = format!("rules:\n  artipacked:\n    remap:\n      severity: {sev}");
+            let instance = yaml_serde::from_str::<serde_json::Value>(&yaml).unwrap();
+            SCHEMA_VALIDATOR
+                .validate(&instance)
+                .unwrap_or_else(|_| panic!("severity '{sev}' should be valid in remap"));
+        }
+    }
+
+    #[test]
+    fn test_remap_invalid_severity() {
+        let invalid = "rules:\n  artipacked:\n    remap:\n      severity: Ultra";
+        let instance = yaml_serde::from_str::<serde_json::Value>(invalid).unwrap();
+        assert!(
+            SCHEMA_VALIDATOR.validate(&instance).is_err(),
+            "unknown severity 'Ultra' should be invalid"
+        );
     }
 }

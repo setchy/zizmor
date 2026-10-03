@@ -5,28 +5,41 @@
 
 use github_actions_expressions::context::{self};
 use github_actions_models::{
-    common::{self, expr::LoE},
+    common::{self, CacheMode, expr::LoE},
     workflow::{
-        self, Trigger,
+        self, TriggerSyntax,
         event::{BareEvent, OptionalBody},
-        job::{self, RunsOn, StepBody},
+        job,
     },
 };
+use std::collections::HashSet;
+use std::sync::LazyLock;
 use terminal_link::Link;
 
+pub(crate) mod cache_mode;
 pub(crate) mod matrix;
+pub(crate) mod runners;
 
+use crate::models::workflow::runners::{JobRunners, Runner};
 use crate::{
     InputKey,
     finding::location::{Locatable, SymbolicFeature, SymbolicLocation},
     models::{
-        AsDocument, StepBodyCommon, StepCommon,
+        AsDocument, StepBodyCommon, StepCommon, Validatable,
         inputs::{Capability, HasInputs},
         workflow::matrix::Matrix,
     },
     registry::input::CollectionError,
-    utils::{self, WORKFLOW_VALIDATOR, from_str_with_validation},
+    utils::{self, once::warn_once},
 };
+
+static WORKFLOW_VALIDATOR: LazyLock<jsonschema::Validator> = LazyLock::new(|| {
+    jsonschema::validator_for(
+        &serde_json::from_str(include_str!("../data/github-workflow.json"))
+            .expect("internal error: compiled asset not JSON?"),
+    )
+    .expect("internal error: failed to load workflow schema")
+});
 
 /// Represents an entire GitHub Actions workflow.
 ///
@@ -39,6 +52,16 @@ pub(crate) struct Workflow {
     pub(crate) link: Option<String>,
     document: yamlpath::Document,
     inner: workflow::Workflow,
+}
+
+impl<'de> Validatable<'de> for Workflow {
+    type Target = workflow::Workflow;
+
+    type Skeleton = yaml_serde::Mapping;
+
+    fn validator() -> &'static jsonschema::Validator {
+        &WORKFLOW_VALIDATOR
+    }
 }
 
 impl<'a> AsDocument<'a, 'a> for Workflow {
@@ -89,12 +112,10 @@ impl HasInputs for workflow::event::WorkflowDispatch {
 
 impl HasInputs for Workflow {
     fn get_input(&self, name: &str) -> Option<Capability> {
-        let workflow::Trigger::Events(events) = &self.on else {
-            return None;
-        };
+        let events = &self.on.events;
 
         let wc_cap = {
-            if let workflow::event::OptionalBody::Body(wc) = &events.workflow_call {
+            if let OptionalBody::Body(wc) = &events.workflow_call {
                 wc.get_input(name)
             } else {
                 None
@@ -102,7 +123,7 @@ impl HasInputs for Workflow {
         };
 
         let wd_cap = {
-            if let workflow::event::OptionalBody::Body(wd) = &events.workflow_dispatch {
+            if let OptionalBody::Body(wd) = &events.workflow_dispatch {
                 wd.get_input(name)
             } else {
                 None
@@ -120,7 +141,7 @@ impl HasInputs for Workflow {
 impl Workflow {
     /// Load a workflow from a buffer, with an assigned name.
     pub(crate) fn from_string(contents: String, key: InputKey) -> Result<Self, CollectionError> {
-        let inner = from_str_with_validation(&contents, &WORKFLOW_VALIDATOR)?;
+        let inner = Self::validate(&contents)?;
 
         let document = yamlpath::Document::new(&contents)?;
 
@@ -145,46 +166,73 @@ impl Workflow {
         Jobs::new(self)
     }
 
-    /// Whether this workflow is triggered by pull_request_target.
-    pub(crate) fn has_pull_request_target(&self) -> bool {
-        match &self.on {
-            Trigger::BareEvent(event) => *event == BareEvent::PullRequestTarget,
-            Trigger::BareEvents(events) => events.contains(&BareEvent::PullRequestTarget),
-            Trigger::Events(events) => !matches!(events.pull_request_target, OptionalBody::Missing),
+    /// Produce a [`SymbolicLocation`] for an event that's known to be present
+    /// in the workflow's triggers.
+    fn trigger_location(&self, event: BareEvent) -> SymbolicLocation<'_> {
+        let parent = self.location().with_keys(["on".into()]);
+
+        match &self.on.syntax {
+            TriggerSyntax::Mapping => parent.with_keys([event.as_str().into()]).key_only(),
+            TriggerSyntax::Scalar => parent,
+            TriggerSyntax::Sequence(events) => {
+                let idx = events
+                    .iter()
+                    .position(|candidate| *candidate == event)
+                    .expect("present event must appear in the source sequence");
+                parent.with_keys([idx.into()])
+            }
         }
     }
 
-    /// Whether this workflow is triggered by workflow_run.
-    pub(crate) fn has_workflow_run(&self) -> bool {
-        match &self.on {
-            Trigger::BareEvent(event) => *event == BareEvent::WorkflowRun,
-            Trigger::BareEvents(events) => events.contains(&BareEvent::WorkflowRun),
-            Trigger::Events(events) => !matches!(events.workflow_run, OptionalBody::Missing),
-        }
+    /// Return the symbolic location for this workflow's `issue_comment` trigger,
+    /// if it has one.
+    pub(crate) fn issue_comment<'doc>(&'doc self) -> Option<SymbolicLocation<'doc>> {
+        self.on
+            .events
+            .issue_comment
+            .is_present()
+            .then(|| self.trigger_location(BareEvent::IssueComment))
     }
 
-    /// Whether this workflow is triggered by `workflow_call`, i.e. whether it's reusable or not.
-    pub(crate) fn has_workflow_call(&self) -> bool {
-        match &self.on {
-            Trigger::BareEvent(event) => *event == BareEvent::WorkflowCall,
-            Trigger::BareEvents(events) => events.contains(&BareEvent::WorkflowCall),
-            Trigger::Events(events) => !matches!(events.workflow_call, OptionalBody::Missing),
-        }
+    /// Return the symbolic location for this workflow's `pull_request_target` trigger,
+    /// if it has one.
+    pub(crate) fn pull_request_target<'doc>(&'doc self) -> Option<SymbolicLocation<'doc>> {
+        self.on
+            .events
+            .pull_request_target
+            .is_present()
+            .then(|| self.trigger_location(BareEvent::PullRequestTarget))
+    }
+
+    /// Return the symbolic location for this workflow's `workflow_run` trigger,
+    /// if it has one.
+    pub(crate) fn workflow_run<'doc>(&'doc self) -> Option<SymbolicLocation<'doc>> {
+        self.on
+            .events
+            .workflow_run
+            .is_present()
+            .then(|| self.trigger_location(BareEvent::WorkflowRun))
+    }
+
+    /// Return the symbolic location for this workflow's `workflow_call` trigger,
+    /// if it has one.
+    pub(crate) fn workflow_call<'doc>(&'doc self) -> Option<SymbolicLocation<'doc>> {
+        self.on
+            .events
+            .workflow_call
+            .is_present()
+            .then(|| self.trigger_location(BareEvent::WorkflowCall))
     }
 
     /// Whether this workflow is triggered by exactly one event.
     pub(crate) fn has_single_trigger(&self) -> bool {
-        match &self.on {
-            Trigger::BareEvent(_) => true,
-            Trigger::BareEvents(events) => events.len() == 1,
-            Trigger::Events(events) => events.count() == 1,
-        }
+        self.on.events.count() == 1
     }
 
     /// Whether this workflow is *only* a reusable workflow, i.e. it's triggered by a
     /// `workflow_call` event and nothing else.
     pub(crate) fn is_reusable_only(&self) -> bool {
-        self.has_workflow_call() && self.has_single_trigger()
+        self.workflow_call().is_some() && self.has_single_trigger()
     }
 
     /// Returns this workflow's [`SymbolicLocation`].
@@ -194,7 +242,7 @@ impl Workflow {
     /// this through [`Locatable`] would require a split lifetime between
     /// `'self` and `'doc` for just this and [`Action`], i.e. the owning
     /// container types rather than the borrowing subtypes.
-    pub fn location(&self) -> SymbolicLocation<'_> {
+    pub(crate) fn location(&self) -> SymbolicLocation<'_> {
         SymbolicLocation {
             key: &self.key,
             annotation: "this workflow".into(),
@@ -261,8 +309,8 @@ impl<'doc> NormalJob<'doc> {
         match &self.runs_on {
             // The entire runs-on is an expression, so there's nothing we can do.
             LoE::Expr(_) => None,
-            LoE::Literal(RunsOn::Group { group: _, labels })
-            | LoE::Literal(RunsOn::Target(labels)) => {
+            LoE::Literal(job::RunsOn::Group { group: _, labels })
+            | LoE::Literal(job::RunsOn::Target(labels)) => {
                 for label in labels {
                     match label.as_str() {
                         // Default self-hosted routing labels.
@@ -292,8 +340,19 @@ impl<'doc> NormalJob<'doc> {
     ) -> impl Iterator<Item = (&'doc common::If, SymbolicLocation<'doc>)> {
         self.r#if.iter().map(|cond| (cond, self.location())).chain(
             self.steps()
-                .filter_map(|step| step.r#if.as_ref().map(|cond| (cond, step.location()))),
+                .filter_map(|step| step.r#if().map(|cond| (cond, step.location()))),
         )
+    }
+
+    /// Returns an iterator over this job's runners. A runner may be precisely
+    /// defined or have an indetermination attached in case of matrices and
+    /// expressions. See [`Runner`].
+    pub(crate) fn runners(
+        &self,
+        included_runners: &HashSet<String>,
+        excluded_groups: &HashSet<String>,
+    ) -> impl Iterator<Item = Runner<'doc>> {
+        JobRunners::new(self, included_runners, excluded_groups).iter()
     }
 }
 
@@ -314,6 +373,10 @@ impl<'doc> JobCommon<'doc> for NormalJob<'doc> {
 
     fn parent(&self) -> &'doc Workflow {
         self.parent
+    }
+
+    fn cache_mode(&self) -> Option<CacheMode> {
+        self.cache_mode
     }
 }
 
@@ -364,6 +427,10 @@ impl<'doc> JobCommon<'doc> for ReusableWorkflowCallJob<'doc> {
     fn parent(&self) -> &'doc Workflow {
         self.parent
     }
+
+    fn cache_mode(&self) -> Option<CacheMode> {
+        self.cache_mode
+    }
 }
 
 impl<'doc> std::ops::Deref for ReusableWorkflowCallJob<'doc> {
@@ -384,6 +451,9 @@ pub(crate) trait JobCommon<'doc>: Locatable<'doc> {
 
     /// The job's parent [`Workflow`].
     fn parent(&self) -> &'doc Workflow;
+
+    /// The job's [`CacheMode`], if it has an explicit one.
+    fn cache_mode(&self) -> Option<CacheMode>;
 }
 
 impl<'doc, T: JobCommon<'doc>> Locatable<'doc> for T {
@@ -427,6 +497,9 @@ impl<'doc> Job<'doc> {
 }
 
 /// An iterable container for jobs within a [`Workflow`].
+///
+/// Jobs whose `if:` condition is statically known to be false are skipped, since such jobs
+/// cannot execute and therefore can't violate any audits.
 pub(crate) struct Jobs<'doc> {
     parent: &'doc Workflow,
     inner: indexmap::map::Iter<'doc, String, workflow::Job>,
@@ -445,31 +518,46 @@ impl<'doc> Iterator for Jobs<'doc> {
     type Item = Job<'doc>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let item = self.inner.next();
+        for (id, job) in self.inner.by_ref() {
+            let cond = match job {
+                workflow::Job::NormalJob(normal) => normal.r#if.as_ref(),
+                workflow::Job::ReusableWorkflowCallJob(reusable) => reusable.r#if.as_ref(),
+            };
 
-        match item {
-            Some((id, job)) => Some(Job::new(id, job, self.parent)),
-            None => None,
+            if let Some(cond) = cond
+                && crate::models::if_is_statically_false(cond)
+            {
+                continue;
+            }
+
+            return Some(Job::new(id, job, self.parent));
         }
+
+        None
     }
 }
 
 /// Represents a single step in a normal workflow job.
 ///
+/// [`Step`]s are produced by the [`Steps`] iterator, meaning that they present
+/// a "flattened" representation as documented there.
+///
 /// This type implements [`std::ops::Deref`] for [`workflow::job::Step`], which
 /// provides access to the step's actual fields.
 #[derive(Clone)]
 pub(crate) struct Step<'doc> {
-    /// The step's index within its parent job.
-    pub(crate) index: usize,
+    /// The step's index within its parent job's `steps:` block.
+    steps_index: usize,
+    /// The step's index within its `parallel:` block, if it's within one.
+    parallel_index: Option<usize>,
     /// The inner step model.
-    inner: &'doc workflow::job::Step,
+    inner: StepInner<'doc>,
     /// The parent [`Job`].
     pub(crate) parent: NormalJob<'doc>,
 }
 
 impl<'doc> std::ops::Deref for Step<'doc> {
-    type Target = &'doc workflow::job::Step;
+    type Target = StepInner<'doc>;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
@@ -479,16 +567,25 @@ impl<'doc> std::ops::Deref for Step<'doc> {
 impl<'doc> Locatable<'doc> for Step<'doc> {
     /// This step's [`SymbolicLocation`].
     fn location(&self) -> SymbolicLocation<'doc> {
-        self.parent
-            .location()
-            .with_keys(["steps".into(), self.index.into()])
-            .annotated("this step")
+        if let Some(parallel_index) = self.parallel_index {
+            self.job().location().with_keys([
+                "steps".into(),
+                self.steps_index.into(),
+                "parallel".into(),
+                parallel_index.into(),
+            ])
+        } else {
+            self.job()
+                .location()
+                .with_keys(["steps".into(), self.steps_index.into()])
+        }
+        .annotated("this step")
     }
 
     fn location_with_grip(&self) -> SymbolicLocation<'doc> {
-        if self.inner.name.is_some() {
+        if self.name().is_some() {
             self.location().with_keys(["name".into()])
-        } else if self.inner.id.is_some() {
+        } else if self.id().is_some() {
             self.location().with_keys(["id".into()])
         } else {
             self.location()
@@ -503,16 +600,18 @@ impl HasInputs for Step<'_> {
 }
 
 impl<'doc> StepCommon<'doc> for Step<'doc> {
-    fn index(&self) -> usize {
-        self.index
+    fn ord(&self) -> impl Ord {
+        // Observe that the ordering of steps takes their parallel nesting
+        // into account, if present.
+        (self.steps_index, self.parallel_index)
     }
 
     fn env_is_static(&self, ctx: &context::Context) -> bool {
-        utils::env_is_static(ctx, &[&self.env, &self.job().env, &self.workflow().env])
+        utils::env_is_static(ctx, &[self.env(), &self.job().env, &self.workflow().env])
     }
 
     fn uses(&self) -> Option<&'doc common::Uses> {
-        let StepBody::Uses { uses, .. } = &self.inner.body else {
+        let StepInner::Uses(job::UsesStep { uses, .. }) = &self.inner else {
             return None;
         };
 
@@ -523,18 +622,21 @@ impl<'doc> StepCommon<'doc> for Step<'doc> {
         self.job().matrix()
     }
 
-    fn body(&self) -> StepBodyCommon<'doc> {
-        match &self.body {
-            StepBody::Uses { uses, with } => StepBodyCommon::Uses { uses, with },
-            StepBody::Run {
+    fn body(&self) -> Option<StepBodyCommon<'doc>> {
+        match &self.inner {
+            StepInner::Uses(job::UsesStep { uses, with, .. }) => {
+                Some(StepBodyCommon::Uses { uses, with })
+            }
+            StepInner::Run(job::RunStep {
                 run,
                 working_directory,
                 shell,
-            } => StepBodyCommon::Run {
+                ..
+            }) => Some(StepBodyCommon::Run {
                 run,
                 _working_directory: working_directory.as_deref(),
                 _shell: shell.as_ref(),
-            },
+            }),
         }
     }
 
@@ -549,11 +651,45 @@ impl<'doc> StepCommon<'doc> for Step<'doc> {
 }
 
 impl<'doc> Step<'doc> {
-    fn new(index: usize, inner: &'doc workflow::job::Step, parent: NormalJob<'doc>) -> Self {
+    fn new(
+        steps_index: usize,
+        parallel_index: Option<usize>,
+        inner: StepInner<'doc>,
+        parent: NormalJob<'doc>,
+    ) -> Self {
         Self {
-            index,
+            steps_index,
+            parallel_index,
             inner,
             parent,
+        }
+    }
+
+    pub(crate) fn name(&self) -> Option<&'doc str> {
+        match self.inner {
+            StepInner::Uses(uses) => uses.shared.name.as_deref(),
+            StepInner::Run(run) => run.shared.name.as_deref(),
+        }
+    }
+
+    pub(crate) fn id(&self) -> Option<&'doc str> {
+        match self.inner {
+            StepInner::Uses(uses) => uses.shared.id.as_deref(),
+            StepInner::Run(run) => run.shared.id.as_deref(),
+        }
+    }
+
+    pub(crate) fn r#if(&self) -> Option<&'doc common::If> {
+        match self.inner {
+            StepInner::Uses(uses) => uses.shared.r#if.as_ref(),
+            StepInner::Run(run) => run.shared.r#if.as_ref(),
+        }
+    }
+
+    pub(crate) fn env(&self) -> &'doc LoE<common::Env> {
+        match self.inner {
+            StepInner::Uses(uses) => &uses.shared.env,
+            StepInner::Run(run) => &run.shared.env,
         }
     }
 
@@ -572,12 +708,7 @@ impl<'doc> Step<'doc> {
     ///
     /// Invariant: panics if the step is not a `run:` step.
     pub(crate) fn shell(&self) -> Option<(&str, SymbolicLocation<'doc>)> {
-        let StepBody::Run {
-            run: _,
-            working_directory: _,
-            shell,
-        } = &self.inner.body
-        else {
+        let StepInner::Run(job::RunStep { shell, .. }) = &self.inner else {
             panic!("API misuse: can't call shell() on a uses: step")
         };
 
@@ -641,9 +772,42 @@ impl<'doc> Step<'doc> {
     }
 }
 
+/// The subset of [`job::Step`] variants that get expressed through
+/// the [`Step`] API. This is used to reduce the number of unreachable
+/// typestates we need to match against.
+#[derive(Clone)]
+pub(crate) enum StepInner<'doc> {
+    Uses(&'doc job::UsesStep),
+    Run(&'doc job::RunStep),
+}
+
 /// An iterable container for steps within a [`Job`].
+///
+/// This iterator flattens steps that are nested under a `parallel:` pseudo-step.
+/// For example, this job:
+///
+/// ```yaml
+/// steps:
+///   - run: echo a
+///   - parallel:
+///     - run: echo b
+///     - run: echo c
+/// ```
+///
+/// ...becomes a flat iterator over the three `run:` blocks, with the `parallel:`
+/// block itself not directly surfaced by iteration.
+///
+/// Steps whose `if:` condition is statically known to be false are skipped,
+/// since such steps cannot execute and therefore can't violate any audits.
 pub(crate) struct Steps<'doc> {
-    inner: std::iter::Enumerate<std::slice::Iter<'doc, github_actions_models::workflow::job::Step>>,
+    /// Iterator over the job's top-level steps.
+    outer: std::iter::Enumerate<std::slice::Iter<'doc, job::Step>>,
+    /// When iterating a `parallel:` pseudo-step, holds its `steps` index along
+    /// with an iterator over its nested steps. `None` otherwise.
+    parallel: Option<(
+        usize,
+        std::iter::Enumerate<std::slice::Iter<'doc, job::ParallelStep>>,
+    )>,
     parent: NormalJob<'doc>,
 }
 
@@ -651,8 +815,52 @@ impl<'doc> Steps<'doc> {
     /// Create a new [`Steps`].
     fn new(job: &NormalJob<'doc>) -> Self {
         Self {
-            inner: job.steps.iter().enumerate(),
+            outer: job.steps.iter().enumerate(),
+            parallel: None,
             parent: job.clone(),
+        }
+    }
+
+    /// Yield the next flattened `(steps_index, parallel_index, step)`, expanding
+    /// `parallel:` pseudo-steps inline. Unlike [`Iterator::next`], this does not
+    /// filter out statically-disabled steps.
+    fn next_raw(&mut self) -> Option<(usize, Option<usize>, StepInner<'doc>)> {
+        loop {
+            // Drain any in-progress `parallel:` block before advancing the
+            // outer iterator.
+            if let Some((step_idx, par_iter)) = self.parallel.as_mut() {
+                if let Some((par_idx, step)) = par_iter.next() {
+                    let step = match step {
+                        job::ParallelStep::Uses(uses) => StepInner::Uses(uses),
+                        job::ParallelStep::Run(run) => StepInner::Run(run),
+                    };
+
+                    return Some((*step_idx, Some(par_idx), step));
+                }
+                self.parallel = None;
+            }
+
+            let (step_idx, step) = self.outer.next()?;
+            match &step {
+                job::Step::Uses(uses) => return Some((step_idx, None, StepInner::Uses(uses))),
+                job::Step::Run(run) => return Some((step_idx, None, StepInner::Run(run))),
+                job::Step::Wait { .. } | job::Step::WaitAll { .. } | job::Step::Cancel { .. } => {
+                    continue;
+                }
+                job::Step::Parallel {
+                    parallel: parallel_steps,
+                    ..
+                } => {
+                    // TODO: Remove once stabilized.
+                    warn_once!(
+                        "one or more inputs contains parallel steps; zizmor's support \
+                        for these is currently experimental. see \
+                        https://docs.zizmor.sh/usage/#parallel-step for details"
+                    );
+
+                    self.parallel = Some((step_idx, parallel_steps.iter().enumerate()));
+                }
+            }
         }
     }
 }
@@ -661,12 +869,21 @@ impl<'doc> Iterator for Steps<'doc> {
     type Item = Step<'doc>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let item = self.inner.next();
+        while let Some((step_idx, par_idx, step)) = self.next_raw() {
+            // Skip steps whose `if:` is statically known to be false.
+            let r#if = match step {
+                StepInner::Uses(uses) => uses.shared.r#if.as_ref(),
+                StepInner::Run(run) => run.shared.r#if.as_ref(),
+            };
 
-        match item {
-            Some((idx, step)) => Some(Step::new(idx, step, self.parent.clone())),
-            None => None,
+            if let Some(cond) = r#if
+                && crate::models::if_is_statically_false(cond)
+            {
+                continue;
+            }
+            return Some(Step::new(step_idx, par_idx, step, self.parent.clone()));
         }
+        None
     }
 }
 
@@ -708,7 +925,7 @@ jobs:
 
         let workflow = Workflow::from_string(
             workflow.into(),
-            crate::InputKey::local("fakegroup".into(), "dummy", None),
+            crate::InputKey::local("fakegroup".into(), "dummy", None, None),
         )?;
 
         // `foo` unifies in favor of the more permissive capability,

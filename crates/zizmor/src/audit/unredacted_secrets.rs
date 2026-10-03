@@ -1,9 +1,10 @@
-use std::ops::Deref;
+use std::ops::Deref as _;
 
 use github_actions_expressions::{
     Expr, SpannedExpr,
     call::{Call, Function},
     context::Context,
+    op::BinExpr,
 };
 
 use crate::{
@@ -38,6 +39,10 @@ impl Audit for UnredactedSecrets {
         _config: &crate::config::Config,
     ) -> Result<Vec<crate::finding::Finding<'doc>>, AuditError> {
         let mut findings = vec![];
+
+        if !input.supports_gha_template_syntax() {
+            return Ok(findings);
+        }
 
         for (expr, span) in parse_fenced_expressions_from_routable(input) {
             let Ok(parsed) = Expr::parse(expr.as_bare()) else {
@@ -89,14 +94,14 @@ impl UnredactedSecrets {
                 }
             }
             Expr::Index(expr) => results.extend(Self::secret_leakages(expr)),
-            Expr::Context(Context { parts, .. }) => {
+            Expr::Context(Context { parts }) => {
                 results.extend(parts.iter().flat_map(Self::secret_leakages))
             }
-            Expr::BinOp { lhs, op: _, rhs } => {
+            Expr::BinExpr(BinExpr { lhs, op: _, rhs }) => {
                 results.extend(Self::secret_leakages(lhs));
                 results.extend(Self::secret_leakages(rhs));
             }
-            Expr::UnOp { op: _, expr } => results.extend(Self::secret_leakages(expr)),
+            Expr::UnExpr { op: _, expr } => results.extend(Self::secret_leakages(expr)),
             _ => (),
         }
 

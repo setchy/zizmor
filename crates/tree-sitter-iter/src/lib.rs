@@ -3,7 +3,6 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(missing_docs)]
 #![allow(clippy::redundant_field_names)]
-#![forbid(unsafe_code)]
 
 use tree_sitter::{Node, Tree, TreeCursor};
 
@@ -25,10 +24,7 @@ impl<'tree> Iterator for TreeIter<'tree> {
     type Item = Node<'tree>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let cursor = match &mut self.cursor {
-            Some(cursor) => cursor,
-            None => return None,
-        };
+        let cursor = self.cursor.as_mut()?;
 
         let node = cursor.node();
 

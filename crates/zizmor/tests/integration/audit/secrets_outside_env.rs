@@ -38,7 +38,7 @@ fn test_config_invalid_variant() -> Result<()> {
         .output(OutputMode::Stderr)
         .run()?,
         @"
-    🌈 zizmor v@@VERSION@@
+     INFO zizmor: 🌈 zizmor v@@VERSION@@
     fatal: no audit was performed
     error: configuration error in @@CONFIG@@
       |
@@ -148,6 +148,22 @@ fn test_config_allow_some() -> Result<()> {
         .config(input_under_test("secrets-outside-env/configs/allow-some.yml"))
         .run()?,
         @"No findings to report. Good job!"
+    );
+    Ok(())
+}
+
+/// Repro case for #2157: secrets-outside-env should honor an ignore comment
+/// anywhere within the job block, not just on the exact line of the secret reference.
+///
+/// See: <https://github.com/zizmorcore/zizmor/issues/2157>
+#[test]
+fn test_issue_2157() -> Result<()> {
+    insta::assert_snapshot!(
+        zizmor()
+        .args(["--persona=auditor"])
+        .input(input_under_test("secrets-outside-env/issue-2157-repro.yml"))
+        .run()?,
+        @"No findings to report. Good job! (1 ignored)"
     );
     Ok(())
 }

@@ -5,6 +5,8 @@ site_url: https://docs.zizmor.sh/
 docs_dir: docs
 site_dir: site_html
 dev_addr: "127.0.0.1:9999"
+watch:
+  - docs/snippets
 repo_url: https://github.com/zizmorcore/zizmor
 edit_uri: edit/main/docs
 
@@ -13,11 +15,11 @@ nav:
   - "installation.md"
   - "quickstart.md"
   - "usage.md"
+  - "audits.md"
+  - "configuration.md"
   - "integrations.md"
   - "troubleshooting.md"
   - "release-notes.md"
-  - "configuration.md"
-  - "audits.md"
   - "development.md"
   - "trophy-case.md"
 

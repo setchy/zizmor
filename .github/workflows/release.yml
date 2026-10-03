@@ -5,10 +5,12 @@
 #
 # - `release-binaries.yml`: build and attach binaries to the new release on GitHub
 # - `release-pypi.yml`: build and publish distributions of zizmor to PyPI
-# - `release-zizmor-crate.yml`: publish the zizmor crate to crates.io
+# - `release-crates.yml`: publish the zizmor crates to crates.io
+# - `release-docker.yml`: build and publish Docker images to GHCR
 #
 # To enable those child workflows, this workflow creates the release
-# and then invokes each as a reusable workflow, passing the tag as an input.
+# and then invokes each as a reusable workflow, passing the release tag or version
+# as an input.
 
 name: Release zizmor 🌈
 
@@ -33,12 +35,23 @@ jobs:
     permissions: {}
 
     outputs:
-      release-tag: ${{ steps.determine-tag.outputs.RELEASE_TAG }}
+      release-tag: ${{ steps.plan.outputs.RELEASE_TAG }}
+      release-version: ${{ steps.plan.outputs.RELEASE_VERSION }}
+      prerelease: ${{ steps.plan.outputs.PRERELEASE }}
 
     steps:
-      - name: Determine release tag
-        id: determine-tag
-        run: echo "RELEASE_TAG=${RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
+      - name: Plan release
+        id: plan
+        # TODO: This should really be an in-repo Python script.
+        run: |
+          echo "RELEASE_TAG=${RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "RELEASE_VERSION=${RELEASE_TAG#v}" >> "${GITHUB_OUTPUT}"
+
+          if [[ "${RELEASE_TAG}" == *-rc* ]]; then
+            echo "PRERELEASE=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "PRERELEASE=false" >> "${GITHUB_OUTPUT}"
+          fi
         env:
           RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
@@ -60,7 +73,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ needs.plan-release.outputs.release-tag }}
-          PRERELEASE_FLAG: ${{ contains(needs.plan-release.outputs.release-tag, '-rc') && '--prerelease' || '' }}
+          PRERELEASE_FLAG: ${{ needs.plan-release.outputs.prerelease == 'true' && '--prerelease' || '' }}
 
   release-binaries:
     name: Build and attach binaries for ${{ needs.plan-release.outputs.release-tag }}
@@ -71,7 +84,7 @@ jobs:
       attestations: write # for attestations
       contents: write # for release artifacts
 
-    uses: ./.github/workflows/release-binaries.yml
+    uses: $/.github/workflows/release-binaries.yml
     with:
       release-tag: ${{ needs.plan-release.outputs.release-tag }}
 
@@ -82,17 +95,33 @@ jobs:
     permissions:
       id-token: write # for Trusted Publishing + PEP 740 attestations
 
-    uses: ./.github/workflows/release-pypi.yml
+    uses: $/.github/workflows/release-pypi.yml
     with:
       release-tag: ${{ needs.plan-release.outputs.release-tag }}
 
-  release-zizmor-crate:
-    name: Publish zizmor crate to crates.io for ${{ needs.plan-release.outputs.release-tag }}
+  release-crates:
+    name: Publish zizmor crates to crates.io for ${{ needs.plan-release.outputs.release-tag }}
     needs: [plan-release, draft-release]
 
     permissions:
       id-token: write # for Trusted Publishing to crates.io
 
-    uses: ./.github/workflows/release-zizmor-crate.yml
+    uses: $/.github/workflows/release-crates.yml
     with:
       release-tag: ${{ needs.plan-release.outputs.release-tag }}
+
+  release-docker:
+    name: Publish Docker images for ${{ needs.plan-release.outputs.release-tag }}
+    # NOTE: needs `release-pypi` because it pulls the latest wheels from PyPI.
+    needs: [plan-release, draft-release, release-pypi]
+
+    permissions:
+      contents: read
+      id-token: write # for signing Docker image attestations
+      packages: write
+
+    uses: $/.github/workflows/release-docker.yml
+    with:
+      # NOTE: uses release-version, not release-tag because the former isn't prefixed with a `v`.
+      release-version: ${{ needs.plan-release.outputs.release-version }}
+      latest: ${{ needs.plan-release.outputs.prerelease == 'false' }}

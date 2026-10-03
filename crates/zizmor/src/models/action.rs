@@ -3,6 +3,8 @@
 //! These models enrich the models under [`github_actions_models::action`],
 //! providing higher-level APIs for zizmor to use.
 
+use std::sync::LazyLock;
+
 use github_actions_expressions::context;
 use github_actions_models::{
     action,
@@ -14,13 +16,21 @@ use crate::{
     InputKey,
     finding::location::{Locatable, SymbolicFeature, SymbolicLocation},
     models::{
-        AsDocument, StepBodyCommon, StepCommon,
+        AsDocument, StepBodyCommon, StepCommon, Validatable,
         inputs::{Capability, HasInputs},
         workflow::matrix::Matrix,
     },
     registry::input::CollectionError,
-    utils::{self, ACTION_VALIDATOR, from_str_with_validation},
+    utils,
 };
+
+static ACTION_VALIDATOR: LazyLock<jsonschema::Validator> = LazyLock::new(|| {
+    jsonschema::validator_for(
+        &serde_json::from_str(include_str!("../data/github-action.json"))
+            .expect("internal error: compiled asset not JSON?"),
+    )
+    .expect("internal error: failed to load action schema")
+});
 
 /// Represents an entire (composite) action.
 ///
@@ -32,6 +42,16 @@ pub(crate) struct Action {
     pub(crate) link: Option<String>,
     document: yamlpath::Document,
     inner: action::Action,
+}
+
+impl<'de> Validatable<'de> for Action {
+    type Target = action::Action;
+
+    type Skeleton = yaml_serde::Mapping;
+
+    fn validator() -> &'static jsonschema::Validator {
+        &ACTION_VALIDATOR
+    }
 }
 
 impl<'a> AsDocument<'a, 'a> for Action {
@@ -64,7 +84,7 @@ impl HasInputs for Action {
 impl Action {
     /// Load an action from a buffer, with an assigned name.
     pub(crate) fn from_string(contents: String, key: InputKey) -> Result<Self, CollectionError> {
-        let inner = from_str_with_validation(&contents, &ACTION_VALIDATOR)?;
+        let inner = Self::validate(&contents)?;
 
         let document = yamlpath::Document::new(&contents)?;
 
@@ -82,6 +102,17 @@ impl Action {
             document,
             inner,
         })
+    }
+
+    /// Returns a [`DockerAction`] if this action is a Docker action, or `None` otherwise.
+    pub(crate) fn docker<'doc>(&'doc self) -> Option<DockerAction<'doc>> {
+        match &self.inner.runs {
+            action::Runs::Docker(docker) => Some(DockerAction {
+                inner: docker,
+                parent: self,
+            }),
+            _ => None,
+        }
     }
 
     /// Returns a [`CompositeSteps`] iterator over this actions's constituent
@@ -117,7 +148,42 @@ impl Action {
     }
 }
 
+/// A wrapper around [`action::Docker`] that also provides access to the parent [`Action`].
+pub(crate) struct DockerAction<'a> {
+    inner: &'a action::Docker,
+    parent: &'a Action,
+}
+
+impl<'a> std::ops::Deref for DockerAction<'a> {
+    type Target = &'a action::Docker;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<'doc> Locatable<'doc> for DockerAction<'doc> {
+    fn location(&self) -> SymbolicLocation<'doc> {
+        self.parent
+            .location()
+            .annotated("this Docker action")
+            .with_keys(["runs".into()])
+    }
+
+    // TODO(ww): Reasonable location_with_grip here?
+}
+
+impl<'a, 'doc> AsDocument<'a, 'doc> for DockerAction<'doc> {
+    fn as_document(&'a self) -> &'doc yamlpath::Document {
+        self.parent.as_document()
+    }
+}
+
 /// An iterable container for steps within a [`Job`].
+///
+/// Composite steps whose `if:` condition is statically known to be false
+/// (e.g. `if: false` or `if: ${{ false }}`) are skipped, since such steps
+/// cannot execute and therefore can't violate any runtime-behavior audit.
 pub(crate) struct CompositeSteps<'a> {
     inner: std::iter::Enumerate<std::slice::Iter<'a, github_actions_models::action::Step>>,
     parent: &'a Action,
@@ -140,12 +206,15 @@ impl<'a> Iterator for CompositeSteps<'a> {
     type Item = CompositeStep<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let item = self.inner.next();
-
-        match item {
-            Some((idx, step)) => Some(CompositeStep::new(idx, step, self.parent)),
-            None => None,
+        for (idx, step) in self.inner.by_ref() {
+            if let Some(cond) = step.r#if.as_ref()
+                && crate::models::if_is_statically_false(cond)
+            {
+                continue;
+            }
+            return Some(CompositeStep::new(idx, step, self.parent));
         }
+        None
     }
 }
 
@@ -193,7 +262,7 @@ impl HasInputs for CompositeStep<'_> {
 }
 
 impl<'doc> StepCommon<'doc> for CompositeStep<'doc> {
-    fn index(&self) -> usize {
+    fn ord(&self) -> impl Ord {
         self.index
     }
 
@@ -213,8 +282,8 @@ impl<'doc> StepCommon<'doc> for CompositeStep<'doc> {
         None
     }
 
-    fn body(&self) -> StepBodyCommon<'doc> {
-        match &self.body {
+    fn body(&self) -> Option<StepBodyCommon<'doc>> {
+        Some(match &self.body {
             action::StepBody::Uses { uses, with } => StepBodyCommon::Uses { uses, with },
             action::StepBody::Run {
                 run,
@@ -225,7 +294,7 @@ impl<'doc> StepCommon<'doc> for CompositeStep<'doc> {
                 _working_directory: working_directory.as_deref(),
                 _shell: Some(shell),
             },
-        }
+        })
     }
 
     fn document(&self) -> &'doc yamlpath::Document {

@@ -1,13 +1,15 @@
 //! Input registry and associated types.
 
 use std::{
-    collections::{BTreeMap, btree_map},
+    collections::{BTreeMap, HashSet, btree_map},
     io::Read as _,
     path::PathBuf,
     str::FromStr as _,
+    sync::LazyLock,
 };
 
 use camino::{Utf8Path, Utf8PathBuf};
+use itertools::Itertools as _;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -16,7 +18,13 @@ use crate::{
     audit::AuditInput,
     config::{Config, ConfigError},
     github::{Client, ClientError},
-    models::{action::Action, dependabot::Dependabot, workflow::Workflow},
+    models::{
+        action::Action,
+        dependabot::Dependabot,
+        pre_commit::{PreCommitConfig, PreCommitHooks},
+        repo_ref::Slug,
+        workflow::Workflow,
+    },
 };
 
 /// Errors that can occur while collecting inputs.
@@ -35,7 +43,7 @@ pub(crate) enum CollectionError {
     /// The input couldn't be converted into the expected model.
     /// This typically indicates a bug in `github-actions-models`.
     #[error("couldn't turn input into a an appropriate model")]
-    Model(#[from] serde_yaml::Error),
+    Model(#[from] yaml_serde::Error),
 
     /// The input couldn't be loaded into an internal yamlpath document.
     /// This typically indicates a bug in `yamlpath`.
@@ -59,7 +67,7 @@ pub(crate) enum CollectionError {
     /// functional GitHub client (maybe because we're offline, or
     /// because no token was provided).
     #[error("can't fetch remote repository: {0}")]
-    NoGitHubClient(RepoSlug),
+    NoGitHubClient(InputSlug),
 
     /// An error occurred while processing ignore rules.
     #[error("error while processing ignore rules")]
@@ -67,7 +75,7 @@ pub(crate) enum CollectionError {
 
     /// A single input file failed to load as a specific kind.
     #[error("failed to load {1} as {2}")]
-    Inner(#[source] Box<CollectionError>, String, InputKind),
+    Inner(#[source] Box<Self>, String, InputKind),
 
     /// The input doesn't have a `.yml` or `.yaml` extension.
     #[error("invalid input: must have .yml or .yaml extension")]
@@ -94,6 +102,16 @@ pub(crate) enum CollectionError {
     /// No inputs were collected.
     #[error("no inputs collected")]
     NoInputs,
+
+    /// The (remote) input has an ambiguous ref.
+    ///
+    /// For example, `foo/bar@v1` is ambiguous if `v1` is both a tag
+    /// and a branch.
+    #[error(
+        "remote input has an ambiguous Git reference ({0:?} is both a tag and a branch)",
+        .slug.git_ref.as_deref().unwrap_or("HEAD"))
+    ]
+    AmbiguousRemoteRef { slug: InputSlug },
 }
 
 impl CollectionError {
@@ -103,7 +121,7 @@ impl CollectionError {
     /// `Inner` variant, in which case it recurses into the inner error.
     pub(crate) fn inner(&self) -> &Self {
         match self {
-            CollectionError::Inner(inner, _, _) => inner.inner(),
+            Self::Inner(inner, _, _) => inner.inner(),
             _ => self,
         }
     }
@@ -117,30 +135,49 @@ pub(crate) enum InputKind {
     Action,
     /// A Dependabot configuration file.
     Dependabot,
+    /// A `.pre-commit-config.yml` file.
+    PreCommitConfig,
+    /// A `.pre-commit-hooks.yml` file.
+    PreCommitHooks,
 }
 
 impl std::fmt::Display for InputKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            InputKind::Workflow => write!(f, "workflow"),
-            InputKind::Action => write!(f, "action"),
-            InputKind::Dependabot => write!(f, "dependabot config"),
+            Self::Workflow => write!(f, "workflow"),
+            Self::Action => write!(f, "action"),
+            Self::Dependabot => write!(f, "dependabot config"),
+            Self::PreCommitConfig => write!(f, "pre-commit config"),
+            Self::PreCommitHooks => write!(f, "pre-commit hooks definition"),
         }
     }
 }
 
-/// A GitHub repository slug, i.e. `owner/repo[@ref]`.
+/// A GitHub repository slug used as an input to `zizmor`, i.e. `owner/repo[@ref]`.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-pub(crate) struct RepoSlug {
+pub(crate) struct InputSlug {
     /// The owner of the repository.
     pub(crate) owner: String,
     /// The name of the repository.
     pub(crate) repo: String,
     /// An optional Git reference, e.g. a branch or tag name.
-    pub(crate) git_ref: Option<String>,
+    ///
+    /// Note: intentionally not exposed, so that consumers get
+    /// a reasonable default through [`RepoSlug::git_ref()`] instead.
+    git_ref: Option<String>,
 }
 
-impl std::str::FromStr for RepoSlug {
+impl InputSlug {
+    /// Returns a Git reference for this slug.
+    ///
+    /// This reference is the one provided by the slug if present,
+    /// or the default `HEAD` reference if not provided.
+    pub(crate) fn git_ref(&self) -> &str {
+        self.git_ref.as_deref().unwrap_or("HEAD")
+    }
+}
+
+impl std::str::FromStr for InputSlug {
     type Err = CollectionError;
 
     /// NOTE: This is almost exactly the same as
@@ -152,21 +189,19 @@ impl std::str::FromStr for RepoSlug {
             None => (s, None),
         };
 
-        let components = path.split('/').collect::<Vec<_>>();
+        let Some(slug) = Slug::parse(path) else {
+            return Err(CollectionError::InvalidInput(s.into()));
+        };
 
-        match components.len() {
-            2 => Ok(Self {
-                owner: components[0].into(),
-                repo: components[1].into(),
-                git_ref: git_ref.map(|s| s.into()),
-            }),
-            x if x < 2 => Err(CollectionError::InvalidInput(s.into())),
-            _ => Err(CollectionError::InvalidInput(s.into())),
-        }
+        Ok(Self {
+            owner: slug.owner().into(),
+            repo: slug.repo().into(),
+            git_ref: git_ref.map(|s| s.into()),
+        })
     }
 }
 
-impl std::fmt::Display for RepoSlug {
+impl std::fmt::Display for InputSlug {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(ref git_ref) = self.git_ref {
             write!(f, "{}/{}@{}", self.owner, self.repo, git_ref)
@@ -181,10 +216,80 @@ pub(crate) struct LocalKey {
     /// The group this input belongs to.
     #[serde(skip)]
     group: Group,
-    /// The path's nondeterministic prefix, if any.
-    prefix: Option<Utf8PathBuf>,
-    /// The given path to the input. This can be absolute or relative.
-    pub(crate) given_path: Utf8PathBuf,
+
+    /// The verbatim path to the input, exactly as the user supplied it.
+    /// This can be absolute or relative.
+    verbatim_path: Utf8PathBuf,
+
+    /// The "native" path to the input. This is the same as [`Self::verbatim_path`],
+    /// but normalized for the host's default separator. For example, if the user
+    /// supplies a verbatim path of `./foo.yml`, this will be `.\foo.yml` on Windows.
+    ///
+    /// This can be absolute or relative.
+    #[serde(skip)]
+    native_path: Utf8PathBuf,
+
+    /// The "best" identifier for this input.
+    ///
+    /// This will always be a relative path (unless the input itself was absolute),
+    /// and is the "best" in the sense that it attempts to be relative to the repository
+    /// root (if present), rather than whatever relative path the user actually supplied.
+    ///
+    /// This identifier always uses Unix-style path separators.
+    ///
+    /// See [`InputKey::best_identifier`] for more information.
+    #[serde(skip)]
+    best_identifier: String,
+}
+
+impl LocalKey {
+    /// Returns a real path to this [`LocalKey`]'s input, on disk.
+    ///
+    /// This path may be relative or absolute.
+    pub(crate) fn path(&self) -> &Utf8Path {
+        &self.verbatim_path
+    }
+
+    /// Produce the "best" relative path for a given path.
+    ///
+    /// This path is the "best" in the sense that it's intended to be maximally
+    /// compatible with the assumptions that consumers make. Specifically, many
+    /// consumers (like GitHub's "Advanced Security") expect paths to be relative
+    /// to the root of the repository, even if the user supplied them to the tool
+    /// as absolute or relative to some other directory.
+    ///
+    /// NOTE: The path returned by this API is *not* guaranteed to be relative to
+    /// the current directory, if the current directory is not the same as the
+    /// repository root. As such, consumers of this API *must not* assume that they
+    /// can naively test these paths for existence, etc. without first resolving
+    /// them against the repository root.
+    fn best_relative_path<P: AsRef<Utf8Path>>(
+        given_path: P,
+        prefix: Option<P>,
+        root: Option<P>,
+    ) -> Utf8PathBuf {
+        // Happy path: we have a root directory and the input
+        // is relative to it once canonicalized.
+        if let Some(root) = root
+            && let Ok(canonical) = given_path.as_ref().canonicalize_utf8()
+            && let Ok(relative) = canonical.strip_prefix(root.as_ref())
+        {
+            return relative.to_owned();
+        }
+
+        // Semi-happy path: we don't have a root directory,
+        // but we have a known prefix that we can strip from the
+        // input path.
+        if let Some(prefix) = prefix
+            && let Ok(stripped) = given_path.as_ref().strip_prefix(prefix.as_ref())
+        {
+            return stripped.to_owned();
+        }
+
+        // Sad path: no root or known prefix, so we return the
+        // given path as-is and hope for the best.
+        given_path.as_ref().to_owned()
+    }
 }
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, PartialOrd, Ord)]
@@ -192,7 +297,7 @@ pub(crate) struct RemoteKey {
     /// The group this input belongs to.
     #[serde(skip)]
     group: Group,
-    slug: RepoSlug,
+    slug: InputSlug,
     /// The path to the input file within the repository.
     path: Utf8PathBuf,
 }
@@ -220,8 +325,8 @@ pub(crate) enum InputKey {
 impl std::fmt::Display for InputKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            InputKey::Local(local) => write!(f, "file://{path}", path = local.given_path),
-            InputKey::Remote(remote) => {
+            Self::Local(local) => write!(f, "file://{path}", path = local.verbatim_path),
+            Self::Remote(remote) => {
                 // No ref means assume HEAD, i.e. whatever's on the default branch.
                 let git_ref = remote.slug.git_ref.as_deref().unwrap_or("HEAD");
                 write!(
@@ -232,21 +337,50 @@ impl std::fmt::Display for InputKey {
                     path = remote.path
                 )
             }
-            InputKey::Stdin(_) => write!(f, "<stdin>"),
+            Self::Stdin(_) => write!(f, "<stdin>"),
         }
     }
 }
 
 impl InputKey {
-    pub(crate) fn local<P: AsRef<Utf8Path>>(group: Group, path: P, prefix: Option<P>) -> Self {
+    /// Constructs a local InputKey.
+    ///
+    /// `prefix` and `root` are used to derive the input's
+    /// "best" relative path for output rendering purposes.
+    pub(crate) fn local<P: AsRef<Utf8Path>>(
+        group: Group,
+        verbatim_path: P,
+        prefix: Option<P>,
+        root: Option<P>,
+    ) -> Self {
+        let verbatim_path = verbatim_path.as_ref();
+
+        let best_identifier = {
+            let best_relative_path = LocalKey::best_relative_path(
+                verbatim_path,
+                prefix.as_ref().map(P::as_ref),
+                root.as_ref().map(P::as_ref),
+            );
+
+            if best_relative_path.is_relative() {
+                best_relative_path.components().join("/")
+            } else {
+                // Stupid edge case: if user supplied an absolute path and
+                // we couldn't make it relative, then there's no sane normalization
+                // we can perform. Just return it as-is.
+                best_relative_path.into()
+            }
+        };
+
         Self::Local(LocalKey {
             group,
-            prefix: prefix.map(|p| p.as_ref().to_path_buf()),
-            given_path: path.as_ref().to_path_buf(),
+            verbatim_path: verbatim_path.to_path_buf(),
+            native_path: verbatim_path.components().collect(),
+            best_identifier,
         })
     }
 
-    pub(crate) fn remote(slug: &RepoSlug, path: String) -> Self {
+    pub(crate) fn remote(slug: &InputSlug, path: String) -> Self {
         Self::Remote(RemoteKey {
             group: slug.into(),
             slug: slug.clone(),
@@ -260,42 +394,34 @@ impl InputKey {
         })
     }
 
-    /// Returns a path for this [`InputKey`] that's suitable for SARIF
-    /// outputs.
+    /// Returns the "best" identifier for this [`InputKey`].
     ///
-    /// This is similar to [`InputKey::presentation_path`] in terms of being
-    /// a relative path (if the input is relative), but it also strips
-    /// the prefix from local paths, if one is present.
-    ///
-    /// For example, if the user runs `zizmor .`, then an input at
-    /// `./.github/workflows/foo.yml` will be returned as `.github/workflows/foo.yml`,
-    /// rather than `./.github/workflows/foo.yml`.
-    ///
-    /// This is needed for GitHub's interpretation of SARIF, which is brittle
-    /// with absolute paths but _also_ doesn't like relative paths that
-    /// start with relative directory markers.
-    pub(crate) fn sarif_path(&self) -> &str {
+    /// This returns an arbitrary identifier for the input which,
+    /// depending on the input kind, may or may resemble a userful path
+    /// on disk.
+    pub(crate) fn best_identifier(&self) -> &str {
         match self {
-            InputKey::Local(local) => local
-                .prefix
-                .as_ref()
-                .and_then(|pfx| local.given_path.strip_prefix(pfx).ok())
-                .unwrap_or_else(|| &local.given_path)
-                .as_str(),
-            InputKey::Remote(remote) => remote.path.as_str(),
-            InputKey::Stdin(_) => "<stdin>",
+            // Local keys: always use the "best" relative path,
+            // which is opportunistically relative to the repo root
+            // if possible.
+            Self::Local(local) => local.best_identifier.as_str(),
+            // Remote keys: always use the path within the repository,
+            // which is always relative.
+            Self::Remote(remote) => remote.path.as_str(),
+            // Standard input uses an arbitrary identifier.
+            Self::Stdin(_) => "<stdin>",
         }
     }
 
     /// Return a "presentation" path for this [`InputKey`].
     ///
     /// This will always be a relative path for remote keys,
-    /// and will be the given path for local keys.
+    /// and will be the native path for local keys.
     pub(crate) fn presentation_path(&self) -> &str {
         match self {
-            InputKey::Local(local) => local.given_path.as_str(),
-            InputKey::Remote(remote) => remote.path.as_str(),
-            InputKey::Stdin(_) => "<stdin>",
+            Self::Local(local) => local.native_path.as_str(),
+            Self::Remote(remote) => remote.path.as_str(),
+            Self::Stdin(_) => "<stdin>",
         }
     }
 
@@ -304,24 +430,24 @@ impl InputKey {
         // NOTE: Safe unwraps, since the presence of a filename component
         // is a construction invariant of all `InputKey` variants.
         match self {
-            InputKey::Local(local) => local
-                .given_path
+            Self::Local(local) => local
+                .verbatim_path
                 .file_name()
                 .expect("expected input key to have a filename component"),
-            InputKey::Remote(remote) => remote
+            Self::Remote(remote) => remote
                 .path
                 .file_name()
                 .expect("expected input key to have a filename component"),
-            InputKey::Stdin(_) => "<stdin>",
+            Self::Stdin(_) => "<stdin>",
         }
     }
 
     /// Returns the group this input belongs to.
     pub(crate) fn group(&self) -> &Group {
         match self {
-            InputKey::Local(local) => &local.group,
-            InputKey::Remote(remote) => &remote.group,
-            InputKey::Stdin(stdin) => &stdin.group,
+            Self::Local(local) => &local.group,
+            Self::Remote(remote) => &remote.group,
+            Self::Stdin(stdin) => &stdin.group,
         }
     }
 }
@@ -336,25 +462,28 @@ impl From<&str> for Group {
     }
 }
 
-impl From<&RepoSlug> for Group {
-    fn from(value: &RepoSlug) -> Self {
+impl From<&InputSlug> for Group {
+    fn from(value: &InputSlug) -> Self {
         Self(value.to_string())
     }
 }
 
 /// A group of inputs collected from the same source.
 pub(crate) struct InputGroup {
-    /// The collected inputs.
-    inputs: BTreeMap<InputKey, AuditInput>,
     /// The configuration for this group.
     config: Config,
+    /// The group's root directory (as an absolute path), if applicable and inferable.
+    root: Option<Utf8PathBuf>,
+    /// The collected inputs.
+    inputs: BTreeMap<InputKey, AuditInput>,
 }
 
 impl InputGroup {
-    pub(crate) fn new(config: Config) -> Self {
+    pub(crate) fn new(config: Config, root: Option<Utf8PathBuf>) -> Self {
         Self {
-            inputs: Default::default(),
             config,
+            root,
+            inputs: Default::default(),
         }
     }
 
@@ -368,6 +497,59 @@ impl InputGroup {
         Ok(())
     }
 
+    /// Given a path to an input file, attempt to discover the Git repository root that it belongs
+    /// to, if any.
+    ///
+    /// This is a rough approximation of what `git rev-parse --show-toplevel` does.
+    ///
+    /// Returns `None` if the path is not within a Git repository or if the root can't be determined for any reason.
+    pub(crate) fn discover_root(path: &Utf8Path) -> Option<Utf8PathBuf> {
+        Self::discover_root_with_ceilings(path, &GIT_CEILING_DIRECTORIES)
+    }
+
+    fn discover_root_with_ceilings(
+        path: &Utf8Path,
+        ceilings: &HashSet<Utf8PathBuf>,
+    ) -> Option<Utf8PathBuf> {
+        // Canonicalize first; this also avoids a `parent()` of `Some("")`
+        // for inputs like `foo.yml`.
+        let canonical = match path.canonicalize_utf8() {
+            Ok(canonical) => canonical,
+            Err(_) => {
+                tracing::trace!("failed to find a canonical path for {path}");
+                return None;
+            }
+        };
+
+        let mut candidate = if canonical.is_file() {
+            canonical.parent()?.to_path_buf()
+        } else {
+            canonical
+        };
+
+        loop {
+            if ceilings.contains(&candidate) {
+                tracing::trace!("hit a GIT_CEILING_DIRECTORIES entry at {candidate}");
+                break;
+            }
+
+            tracing::trace!("checking if {candidate} is a Git repository root");
+            // Submodules and linked worktrees use a `.git` file instead of a directory.
+            if candidate.join(".git").exists() {
+                return Some(candidate);
+            }
+
+            if let Some(parent) = candidate.parent() {
+                candidate = parent.to_path_buf();
+            } else {
+                break;
+            }
+        }
+
+        tracing::trace!("no Git repository root found for {path}");
+        None
+    }
+
     pub(crate) fn register(
         &mut self,
         kind: InputKind,
@@ -378,10 +560,14 @@ impl InputGroup {
         tracing::debug!("registering {kind} input as with key {key}");
 
         let input: Result<AuditInput, CollectionError> = match kind {
-            InputKind::Workflow => Workflow::from_string(contents, key.clone()).map(|wf| wf.into()),
-            InputKind::Action => Action::from_string(contents, key.clone()).map(|a| a.into()),
-            InputKind::Dependabot => {
-                Dependabot::from_string(contents, key.clone()).map(|d| d.into())
+            InputKind::Workflow => Workflow::from_string(contents, key.clone()).map(Into::into),
+            InputKind::Action => Action::from_string(contents, key.clone()).map(Into::into),
+            InputKind::Dependabot => Dependabot::from_string(contents, key.clone()).map(Into::into),
+            InputKind::PreCommitConfig => {
+                PreCommitConfig::from_string(contents, key.clone()).map(Into::into)
+            }
+            InputKind::PreCommitHooks => {
+                PreCommitHooks::from_string(contents, key.clone()).map(Into::into)
             }
         };
 
@@ -392,7 +578,7 @@ impl InputGroup {
                 Ok(())
             }
             Err(e @ CollectionError::Schema { .. }) if !strict => {
-                tracing::warn!("failed to validate input as {kind}: {e}");
+                tracing::warn!("failed to validate {key} as {kind}: {e}");
                 Ok(())
             }
             Err(e) => Err(CollectionError::Inner(e.into(), key.to_string(), kind)),
@@ -403,36 +589,46 @@ impl InputGroup {
         path: &Utf8Path,
         options: &CollectionOptions,
     ) -> Result<Self, CollectionError> {
-        let config = Config::discover(options, || Config::discover_local(path)).await?;
+        let root = Self::discover_root(path);
+        let config =
+            Config::discover(options, || Config::discover_local(path, root.as_deref())).await?;
 
         // Workflows can be named anything, including `dependabot.yml`
         // (overlapping with Dependabot configs) and `action.yml` (overlapping
         // with action definitions). Consequently, we make a best effort
         // disambiguate them by looking at their parent path.
         // See: https://github.com/zizmorcore/zizmor/issues/1341
-        let is_workflow_path = {
-            let resolved = path.canonicalize_utf8()?;
+        let is_workflow_path = camino::absolute_utf8(path)?
+            .parent()
+            .is_some_and(|parent| parent.ends_with(".github/workflows"));
 
-            resolved
-                .parent()
-                .is_some_and(|parent| parent.ends_with(".github/workflows"))
-        };
-
-        let mut group = Self::new(config);
+        let mut group = Self::new(config, root);
+        let root = group.root.as_deref();
 
         // When collecting individual files, we don't know which part
         // of the input path is the prefix.
         let (key, kind) = match (path.file_stem(), path.extension()) {
+            // TODO: Do we need the `is_workflow_path` disambiguation here?
+            // The only way this could be wrong is if the user does something
+            // bizarre like `.github/workflows/.pre-commit-{config,hooks}.yml`.
+            (Some(".pre-commit-config"), Some("yml" | "yaml")) if !is_workflow_path => (
+                InputKey::local(Group(path.as_str().into()), path, None, root),
+                InputKind::PreCommitConfig,
+            ),
+            (Some(".pre-commit-hooks"), Some("yml" | "yaml")) if !is_workflow_path => (
+                InputKey::local(Group(path.as_str().into()), path, None, root),
+                InputKind::PreCommitHooks,
+            ),
             (Some("dependabot"), Some("yml" | "yaml")) if !is_workflow_path => (
-                InputKey::local(Group(path.as_str().into()), path, None),
+                InputKey::local(Group(path.as_str().into()), path, None, root),
                 InputKind::Dependabot,
             ),
             (Some("action"), Some("yml" | "yaml")) if !is_workflow_path => (
-                InputKey::local(Group(path.as_str().into()), path, None),
+                InputKey::local(Group(path.as_str().into()), path, None, root),
                 InputKind::Action,
             ),
             (Some(_), Some("yml" | "yaml")) => (
-                InputKey::local(Group(path.as_str().into()), path, None),
+                InputKey::local(Group(path.as_str().into()), path, None, root),
                 InputKind::Workflow,
             ),
             _ => return Err(CollectionError::InvalidExtension),
@@ -450,9 +646,11 @@ impl InputGroup {
         path: &Utf8Path,
         options: &CollectionOptions,
     ) -> Result<Self, CollectionError> {
-        let config = Config::discover(options, || Config::discover_local(path)).await?;
+        let root = Self::discover_root(path);
+        let config =
+            Config::discover(options, || Config::discover_local(path, root.as_deref())).await?;
 
-        let mut group = Self::new(config);
+        let mut group = Self::new(config, root);
 
         // Start with all filters disabled, i.e. walk everything.
         let mut walker = ignore::WalkBuilder::new(path);
@@ -477,19 +675,24 @@ impl InputGroup {
                 .git_exclude(true);
         }
 
+        let root = group.root.clone();
         for entry in walker.build() {
             let entry = entry?;
             let entry = <&Utf8Path>::try_from(entry.path())
                 .map_err(|e| CollectionError::InvalidPath(e, entry.path().into()))?;
+            // Pre-compute file status so we don't call `stat()` once per mode
+            // check below.
+            let entry_is_file = entry.is_file();
+            let root = root.as_deref();
 
             if options.mode_set.workflows()
-                && entry.is_file()
+                && entry_is_file
                 && matches!(entry.extension(), Some("yml" | "yaml"))
-                && entry
+                && camino::absolute_utf8(entry)?
                     .parent()
                     .is_some_and(|dir| dir.ends_with(".github/workflows"))
             {
-                let key = InputKey::local(Group(path.as_str().into()), entry, Some(path));
+                let key = InputKey::local(Group(path.as_str().into()), entry, Some(path), root);
                 let contents = std::fs::read_to_string(entry).map_err(|e| {
                     CollectionError::Inner(
                         CollectionError::Io(e).into(),
@@ -501,10 +704,10 @@ impl InputGroup {
             }
 
             if options.mode_set.actions()
-                && entry.is_file()
+                && entry_is_file
                 && matches!(entry.file_name(), Some("action.yml" | "action.yaml"))
             {
-                let key = InputKey::local(Group(path.as_str().into()), entry, Some(path));
+                let key = InputKey::local(Group(path.as_str().into()), entry, Some(path), root);
                 let contents = std::fs::read_to_string(entry).map_err(|e| {
                     CollectionError::Inner(
                         CollectionError::Io(e).into(),
@@ -516,13 +719,13 @@ impl InputGroup {
             }
 
             if options.mode_set.dependabot()
-                && entry.is_file()
+                && entry_is_file
                 && matches!(
                     entry.file_name(),
                     Some("dependabot.yml" | "dependabot.yaml")
                 )
             {
-                let key = InputKey::local(Group(path.as_str().into()), entry, Some(path));
+                let key = InputKey::local(Group(path.as_str().into()), entry, Some(path), root);
                 let contents = std::fs::read_to_string(entry).map_err(|e| {
                     CollectionError::Inner(
                         CollectionError::Io(e).into(),
@@ -532,20 +735,50 @@ impl InputGroup {
                 })?;
                 group.register(InputKind::Dependabot, contents, key, options.strict)?;
             }
+
+            if options.mode_set.pre_commit() && entry_is_file {
+                if matches!(
+                    entry.file_name(),
+                    Some(".pre-commit-config.yml" | ".pre-commit-config.yaml")
+                ) {
+                    let key = InputKey::local(Group(path.as_str().into()), entry, Some(path), root);
+                    let contents = std::fs::read_to_string(entry).map_err(|e| {
+                        CollectionError::Inner(
+                            CollectionError::Io(e).into(),
+                            key.to_string(),
+                            InputKind::PreCommitConfig,
+                        )
+                    })?;
+                    group.register(InputKind::PreCommitConfig, contents, key, options.strict)?;
+                } else if matches!(
+                    entry.file_name(),
+                    Some(".pre-commit-hooks.yml" | ".pre-commit-hooks.yaml")
+                ) {
+                    let key = InputKey::local(Group(path.as_str().into()), entry, Some(path), root);
+                    let contents = std::fs::read_to_string(entry).map_err(|e| {
+                        CollectionError::Inner(
+                            CollectionError::Io(e).into(),
+                            key.to_string(),
+                            InputKind::PreCommitHooks,
+                        )
+                    })?;
+                    group.register(InputKind::PreCommitHooks, contents, key, options.strict)?;
+                }
+            }
         }
 
         Ok(group)
     }
 
     async fn collect_from_repo_slug(
-        slug: RepoSlug,
+        slug: InputSlug,
         options: &CollectionOptions,
         gh_client: Option<&Client>,
     ) -> Result<Self, CollectionError> {
         let client = gh_client.ok_or_else(|| CollectionError::NoGitHubClient(slug.clone()))?;
 
         let config = Config::discover(options, || Config::discover_remote(client, &slug)).await?;
-        let mut group = Self::new(config);
+        let mut group = Self::new(config, None);
 
         if options.mode_set.workflows_only() {
             // Performance: if we're *only* collecting workflows, then we
@@ -576,7 +809,8 @@ impl InputGroup {
             .read_to_string(&mut contents)
             .map_err(CollectionError::Io)?;
 
-        let mut group = Self::new(Config::default());
+        // TODO: This should probably honor the global config, if passed by the user?
+        let mut group = Self::new(Config::default(), None);
         let key = InputKey::stdin();
 
         // Infer the input type by trying each parser in order.
@@ -593,7 +827,20 @@ impl InputGroup {
             return Ok(group);
         }
 
-        if let Ok(()) = group.register(InputKind::Dependabot, contents, key, true) {
+        if let Ok(()) = group.register(InputKind::Dependabot, contents.clone(), key.clone(), true) {
+            return Ok(group);
+        }
+
+        if let Ok(()) = group.register(
+            InputKind::PreCommitConfig,
+            contents.clone(),
+            key.clone(),
+            true,
+        ) {
+            return Ok(group);
+        }
+
+        if let Ok(()) = group.register(InputKind::PreCommitHooks, contents, key, true) {
             return Ok(group);
         }
 
@@ -620,7 +867,7 @@ impl InputGroup {
         } else if path.is_dir() {
             Self::collect_from_dir(path, options).await
         } else {
-            let slug = RepoSlug::from_str(request)?;
+            let slug = InputSlug::from_str(request)?;
             Self::collect_from_repo_slug(slug, options, gh_client).await
         }
     }
@@ -629,6 +876,39 @@ impl InputGroup {
         self.inputs.len()
     }
 }
+
+/// Cached parse of the process's `GIT_CEILING_DIRECTORIES`.
+static GIT_CEILING_DIRECTORIES: LazyLock<HashSet<Utf8PathBuf>> = LazyLock::new(|| {
+    let Ok(raw) = std::env::var("GIT_CEILING_DIRECTORIES") else {
+        return HashSet::new();
+    };
+
+    let separator = if cfg!(windows) { ';' } else { ':' };
+    let mut resolve = true;
+    let mut ceilings = HashSet::new();
+    for entry in raw.split(separator) {
+        // Per `git` docs, an empty entry means that all subsequent
+        // entries are not resolved.
+        // See: <https://git-scm.com/docs/git#Documentation/git.txt-GITCEILINGDIRECTORIES>
+        if entry.is_empty() {
+            resolve = false;
+            continue;
+        }
+        let path = Utf8Path::new(entry);
+        if !path.is_absolute() {
+            continue;
+        }
+        let resolved = if resolve {
+            path.canonicalize_utf8().ok()
+        } else {
+            Some(path.to_path_buf())
+        };
+        if let Some(p) = resolved {
+            ceilings.insert(p);
+        }
+    }
+    ceilings
+});
 
 pub(crate) struct InputRegistry {
     // NOTE: We use a BTreeMap here to ensure that registered inputs
@@ -685,24 +965,28 @@ impl InputRegistry {
         &self
             .groups
             .get(group)
-            .expect("API misuse: requested config for an un-registered input")
+            .expect("API misuse: requested an un-registered input group")
             .config
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr as _;
+    use std::{collections::HashSet, str::FromStr as _};
 
-    use super::{InputKey, RepoSlug};
+    use camino::{Utf8Path, Utf8PathBuf};
+
+    use crate::registry::input::InputGroup;
+
+    use super::{InputKey, InputSlug};
 
     #[test]
     fn test_input_key_display() {
-        let local = InputKey::local("fakegroup".into(), "/foo/bar/baz.yml", None);
+        let local = InputKey::local("fakegroup".into(), "/foo/bar/baz.yml", None, None);
         assert_eq!(local.to_string(), "file:///foo/bar/baz.yml");
 
         // No ref
-        let slug = RepoSlug::from_str("foo/bar").unwrap();
+        let slug = InputSlug::from_str("foo/bar").unwrap();
         let remote = InputKey::remote(&slug, ".github/workflows/baz.yml".into());
         assert_eq!(
             remote.to_string(),
@@ -710,7 +994,7 @@ mod tests {
         );
 
         // With a git ref
-        let slug = RepoSlug::from_str("foo/bar@v1").unwrap();
+        let slug = InputSlug::from_str("foo/bar@v1").unwrap();
         let remote = InputKey::remote(&slug, ".github/workflows/baz.yml".into());
         assert_eq!(
             remote.to_string(),
@@ -718,47 +1002,147 @@ mod tests {
         );
     }
 
+    /// Tests that [`InputKey::presentation_path`] returns the exact path that the user
+    /// supplied (regardless of prefix or root), but normalized for the host's default
+    /// separator.
     #[test]
     fn test_input_key_local_presentation_path() {
-        let local = InputKey::local("fakegroup".into(), "/foo/bar/baz.yml", None);
-        assert_eq!(local.presentation_path(), "/foo/bar/baz.yml");
+        let local = InputKey::local("fakegroup".into(), "/foo/bar/baz.yml", None, None);
+        if cfg!(target_os = "windows") {
+            assert_eq!(local.presentation_path(), "\\foo\\bar\\baz.yml");
+        } else {
+            assert_eq!(local.presentation_path(), "/foo/bar/baz.yml");
+        }
 
-        let local = InputKey::local("fakegroup".into(), "/foo/bar/baz.yml", Some("/foo"));
-        assert_eq!(local.presentation_path(), "/foo/bar/baz.yml");
+        let local = InputKey::local("fakegroup".into(), "/foo/bar/baz.yml", Some("/foo"), None);
+        if cfg!(target_os = "windows") {
+            assert_eq!(local.presentation_path(), "\\foo\\bar\\baz.yml");
+        } else {
+            assert_eq!(local.presentation_path(), "/foo/bar/baz.yml");
+        }
+    }
 
-        let local = InputKey::local("fakegroup".into(), "/foo/bar/baz.yml", Some("/foo/bar/"));
-        assert_eq!(local.presentation_path(), "/foo/bar/baz.yml");
+    #[test]
+    fn test_input_key_local_best_identifier() {
+        // "Rootless" cases: with no group root, best_identifier falls back to
+        // stripping the input's own prefix (if any), else returns the path
+        // as-is.
+        let local = InputKey::local("fakegroup".into(), "bar/baz.yml", None, None);
+        assert_eq!(local.best_identifier(), "bar/baz.yml");
+
+        // Rootless with an absolute input passes through as-is.
+        let absolute = if cfg!(windows) {
+            Utf8Path::new(r"C:\foo\bar\baz.yml")
+        } else {
+            Utf8Path::new("/foo/bar/baz.yml")
+        };
+        let local = InputKey::local("fakegroup".into(), absolute, None, None);
+        assert_eq!(local.best_identifier(), absolute);
+
+        let local = InputKey::local("fakegroup".into(), "/foo/bar/baz.yml", Some("/foo"), None);
+        assert_eq!(local.best_identifier(), "bar/baz.yml");
+
+        let local = InputKey::local(
+            "fakegroup".into(),
+            "/foo/bar/baz.yml",
+            Some("/foo/bar/"),
+            None,
+        );
+        assert_eq!(local.best_identifier(), "baz.yml");
 
         let local = InputKey::local(
             "fakegroup".into(),
             "/home/runner/work/repo/repo/.github/workflows/baz.yml",
             Some("/home/runner/work/repo/repo"),
+            None,
         );
+        assert_eq!(local.best_identifier(), ".github/workflows/baz.yml");
+
+        let local = InputKey::local(
+            "fakegroup".into(),
+            "./.github/workflows/baz.yml",
+            Some("."),
+            None,
+        );
+        assert_eq!(local.best_identifier(), ".github/workflows/baz.yml");
+
+        // "Rooted" case: with a real root, best_identifier is canonical-then-strip.
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let temp_path = Utf8PathBuf::try_from(temp_dir.path().to_path_buf())
+            .unwrap()
+            .canonicalize_utf8()
+            .unwrap();
+
+        let child = temp_path.join("foo/bar/baz.yml");
+        std::fs::create_dir_all(child.parent().unwrap()).unwrap();
+        std::fs::write(&child, "contents").unwrap();
+
+        let local = InputKey::local("fakegroup".into(), child, None, Some(temp_path));
+        assert_eq!(local.best_identifier(), "foo/bar/baz.yml");
+    }
+
+    #[test]
+    fn test_discover_root_in_submodule() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let temp_path = Utf8PathBuf::try_from(temp_dir.path().to_path_buf())
+            .unwrap()
+            .canonicalize_utf8()
+            .unwrap();
+
+        std::fs::create_dir_all(temp_path.join(".git/modules/submodule")).unwrap();
+        let submodule = temp_path.join("submodule");
+        let child = submodule.join("subdir");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(
+            submodule.join(".git"),
+            "gitdir: ../.git/modules/submodule\n",
+        )
+        .unwrap();
+
         assert_eq!(
-            local.presentation_path(),
-            "/home/runner/work/repo/repo/.github/workflows/baz.yml"
+            InputGroup::discover_root_with_ceilings(&child, &HashSet::new()),
+            Some(submodule),
         );
     }
 
     #[test]
-    fn test_input_key_local_sarif_path() {
-        let local = InputKey::local("fakegroup".into(), "/foo/bar/baz.yml", None);
-        assert_eq!(local.sarif_path(), "/foo/bar/baz.yml");
+    fn test_discover_root_respects_ceiling() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let temp_path = Utf8PathBuf::try_from(temp_dir.path().to_path_buf())
+            .unwrap()
+            .canonicalize_utf8()
+            .unwrap();
 
-        let local = InputKey::local("fakegroup".into(), "/foo/bar/baz.yml", Some("/foo"));
-        assert_eq!(local.sarif_path(), "bar/baz.yml");
+        std::fs::create_dir(temp_path.join(".git")).unwrap();
+        let child = temp_path.join("project/subdir");
+        std::fs::create_dir_all(&child).unwrap();
 
-        let local = InputKey::local("fakegroup".into(), "/foo/bar/baz.yml", Some("/foo/bar/"));
-        assert_eq!(local.sarif_path(), "baz.yml");
-
-        let local = InputKey::local(
-            "fakegroup".into(),
-            "/home/runner/work/repo/repo/.github/workflows/baz.yml",
-            Some("/home/runner/work/repo/repo"),
+        // No ceiling: the walk finds the fake repo.
+        assert_eq!(
+            InputGroup::discover_root_with_ceilings(&child, &HashSet::new()),
+            Some(temp_path.clone()),
         );
-        assert_eq!(local.sarif_path(), ".github/workflows/baz.yml");
 
-        let local = InputKey::local("fakegroup".into(), "./.github/workflows/baz.yml", Some("."));
-        assert_eq!(local.sarif_path(), ".github/workflows/baz.yml");
+        // The repo itself is a ceiling: the walk stops before examining it.
+        assert_eq!(
+            InputGroup::discover_root_with_ceilings(&child, &HashSet::from([temp_path.clone()]),),
+            None,
+        );
+
+        // An ancestor above the repo is the ceiling, so the repo is still found.
+        let parent_ceiling = temp_path.parent().unwrap().to_path_buf();
+        assert_eq!(
+            InputGroup::discover_root_with_ceilings(&child, &HashSet::from([parent_ceiling]),),
+            Some(temp_path.clone()),
+        );
+
+        // File inputs: canonicalize then walk from the file's parent.
+        let workflow_file = temp_path.join(".github/workflows/test.yml");
+        std::fs::create_dir_all(workflow_file.parent().unwrap()).unwrap();
+        std::fs::write(&workflow_file, "").unwrap();
+        assert_eq!(
+            InputGroup::discover_root_with_ceilings(&workflow_file, &HashSet::new()),
+            Some(temp_path),
+        );
     }
 }

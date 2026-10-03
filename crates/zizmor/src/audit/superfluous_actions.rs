@@ -85,6 +85,24 @@ static SUPERFLUOUS_ACTIONS: LazyLock<Vec<(RepositoryUsesPattern, &str, Persona, 
                 Confidence::Low,
             ),
             (
+                "dacbd/create-issue-action".parse().unwrap(),
+                "use `gh issue create` in a script step",
+                Persona::Regular,
+                Confidence::High,
+            ),
+            (
+                "actions-ecosystem/action-add-labels".parse().unwrap(),
+                "use `gh issue edit --add-label` or `gh pr edit --add-label` in a script step",
+                Persona::Regular,
+                Confidence::High,
+            ),
+            (
+                "actions-ecosystem/action-remove-labels".parse().unwrap(),
+                "use `gh issue edit --remove-label` or `gh pr edit --remove-label` in a script step",
+                Persona::Regular,
+                Confidence::High,
+            ),
+            (
                 "svenstaro/upload-release-action".parse().unwrap(),
                 "use `gh release create` and `gh release upload` in a script step",
                 Persona::Regular,
@@ -97,10 +115,38 @@ static SUPERFLUOUS_ACTIONS: LazyLock<Vec<(RepositoryUsesPattern, &str, Persona, 
                 Confidence::High,
             ),
             (
-                "dtolnay/rust-toolchain".parse().unwrap(),
-                "use `rustup` and/or `cargo` in a script step",
+                "sergeysova/jq-action".parse().unwrap(),
+                "use `jq` in a script step",
                 Persona::Regular,
                 Confidence::High,
+            ),
+            (
+                "dtolnay/rust-toolchain".parse().unwrap(),
+                "use `rustup` and/or `cargo` in a script step",
+                // NOTE(ww): Currently pedantic because this action does
+                // some additional environment setup, and users find the
+                // finding here disruptive.
+                // See: <https://github.com/zizmorcore/zizmor/issues/1817>
+                Persona::Pedantic,
+                Confidence::Medium,
+            ),
+            (
+                "stefanzweifel/git-auto-commit-action".parse().unwrap(),
+                "use `git add`, `git commit`, and `git push` in a script step",
+                // NOTE: Currently pedantic because replicating this action's
+                // full behaviour (empty commit detection, auth setup, etc.)
+                // requires multiple git commands and some care.
+                Persona::Pedantic,
+                Confidence::Low,
+            ),
+            (
+                "EndBug/add-and-commit".parse().unwrap(),
+                "use `git add`, `git commit`, and `git push` in a script step",
+                // NOTE: Currently pedantic because replicating this action's
+                // full behaviour (empty commit detection, auth setup, etc.)
+                // requires multiple git commands and some care.
+                Persona::Pedantic,
+                Confidence::Low,
             ),
         ]
     });
@@ -116,7 +162,7 @@ impl SuperfluousActions {
 
         let mut findings = vec![];
         for (pattern, recommendation, persona, confidence) in SUPERFLUOUS_ACTIONS.iter() {
-            if pattern.matches(uses) {
+            if pattern.matches(&uses.into()) {
                 findings.push(
                     Self::finding()
                         .confidence(*confidence)
@@ -130,6 +176,7 @@ impl SuperfluousActions {
                                 .annotated(*recommendation)
                                 .primary(),
                         )
+                        .add_location(step.location().hidden())
                         .build(step)?,
                 );
             }

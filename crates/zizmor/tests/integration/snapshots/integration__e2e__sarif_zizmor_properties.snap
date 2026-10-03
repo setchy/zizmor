@@ -1,6 +1,6 @@
 ---
 source: crates/zizmor/tests/integration/e2e.rs
-expression: "zizmor().offline(true).input(input_under_test(\"several-vulnerabilities.yml\")).args([\"--format=sarif\"]).run()?"
+expression: "zizmor().input(input_under_test(\"several-vulnerabilities.yml\")).args([\"--format=sarif\"]).run()?"
 ---
 {
   "$schema": "https://docs.oasis-open.org/sarif/sarif/v2.1.0/os/schemas/sarif-schema-2.1.0.json",
@@ -29,8 +29,7 @@ expression: "zizmor().offline(true).input(input_under_test(\"several-vulnerabili
                                 "feature_kind": "Normal",
                                 "key": {
                                   "Local": {
-                                    "given_path": "@@INPUT@@",
-                                    "prefix": null
+                                    "verbatim_path": "@@INPUT@@"
                                   }
                                 },
                                 "kind": "Related",
@@ -79,8 +78,7 @@ expression: "zizmor().offline(true).input(input_under_test(\"several-vulnerabili
                                 "feature_kind": "Normal",
                                 "key": {
                                   "Local": {
-                                    "given_path": "@@INPUT@@",
-                                    "prefix": null
+                                    "verbatim_path": "@@INPUT@@"
                                   }
                                 },
                                 "kind": "Primary",
@@ -138,8 +136,7 @@ expression: "zizmor().offline(true).input(input_under_test(\"several-vulnerabili
                       "feature_kind": "Normal",
                       "key": {
                         "Local": {
-                          "given_path": "@@INPUT@@",
-                          "prefix": null
+                          "verbatim_path": "@@INPUT@@"
                         }
                       },
                       "kind": "Primary",
@@ -181,7 +178,7 @@ expression: "zizmor().offline(true).input(input_under_test(\"several-vulnerabili
             }
           ],
           "message": {
-            "text": "overly broad permissions"
+            "text": "overly broad permissions: uses write-all permissions"
           },
           "properties": {
             "zizmor/confidence": "High",
@@ -204,11 +201,10 @@ expression: "zizmor().offline(true).input(input_under_test(\"several-vulnerabili
                             "properties": {
                               "symbolic": {
                                 "annotation": "pull_request_target is almost always used insecurely",
-                                "feature_kind": "Normal",
+                                "feature_kind": "KeyOnly",
                                 "key": {
                                   "Local": {
-                                    "given_path": "@@INPUT@@",
-                                    "prefix": null
+                                    "verbatim_path": "@@INPUT@@"
                                   }
                                 },
                                 "kind": "Primary",
@@ -216,6 +212,9 @@ expression: "zizmor().offline(true).input(input_under_test(\"several-vulnerabili
                                   "route": [
                                     {
                                       "Key": "on"
+                                    },
+                                    {
+                                      "Key": "pull_request_target"
                                     }
                                   ]
                                 }
@@ -231,14 +230,14 @@ expression: "zizmor().offline(true).input(input_under_test(\"several-vulnerabili
                             "uri": "@@INPUT@@"
                           },
                           "region": {
-                            "endColumn": 23,
+                            "endColumn": 22,
                             "endLine": 3,
                             "snippet": {
-                              "text": "on:\n  pull_request_target:"
+                              "text": "pull_request_target"
                             },
                             "sourceLanguage": "yaml",
-                            "startColumn": 1,
-                            "startLine": 2
+                            "startColumn": 3,
+                            "startLine": 3
                           }
                         }
                       }
@@ -257,11 +256,10 @@ expression: "zizmor().offline(true).input(input_under_test(\"several-vulnerabili
                   "properties": {
                     "symbolic": {
                       "annotation": "pull_request_target is almost always used insecurely",
-                      "feature_kind": "Normal",
+                      "feature_kind": "KeyOnly",
                       "key": {
                         "Local": {
-                          "given_path": "@@INPUT@@",
-                          "prefix": null
+                          "verbatim_path": "@@INPUT@@"
                         }
                       },
                       "kind": "Primary",
@@ -269,6 +267,9 @@ expression: "zizmor().offline(true).input(input_under_test(\"several-vulnerabili
                         "route": [
                           {
                             "Key": "on"
+                          },
+                          {
+                            "Key": "pull_request_target"
                           }
                         ]
                       }
@@ -284,20 +285,20 @@ expression: "zizmor().offline(true).input(input_under_test(\"several-vulnerabili
                   "uri": "@@INPUT@@"
                 },
                 "region": {
-                  "endColumn": 23,
+                  "endColumn": 22,
                   "endLine": 3,
                   "snippet": {
-                    "text": "on:\n  pull_request_target:"
+                    "text": "pull_request_target"
                   },
                   "sourceLanguage": "yaml",
-                  "startColumn": 1,
-                  "startLine": 2
+                  "startColumn": 3,
+                  "startLine": 3
                 }
               }
             }
           ],
           "message": {
-            "text": "use of fundamentally insecure workflow trigger"
+            "text": "use of fundamentally insecure workflow trigger: pull_request_target is almost always used insecurely"
           },
           "properties": {
             "zizmor/confidence": "Medium",
@@ -330,8 +331,7 @@ expression: "zizmor().offline(true).input(input_under_test(\"several-vulnerabili
                                 },
                                 "key": {
                                   "Local": {
-                                    "given_path": "@@INPUT@@",
-                                    "prefix": null
+                                    "verbatim_path": "@@INPUT@@"
                                   }
                                 },
                                 "kind": "Primary",
@@ -389,8 +389,7 @@ expression: "zizmor().offline(true).input(input_under_test(\"several-vulnerabili
                                 "feature_kind": "KeyOnly",
                                 "key": {
                                   "Local": {
-                                    "given_path": "@@INPUT@@",
-                                    "prefix": null
+                                    "verbatim_path": "@@INPUT@@"
                                   }
                                 },
                                 "kind": "Related",
@@ -461,8 +460,7 @@ expression: "zizmor().offline(true).input(input_under_test(\"several-vulnerabili
                       },
                       "key": {
                         "Local": {
-                          "given_path": "@@INPUT@@",
-                          "prefix": null
+                          "verbatim_path": "@@INPUT@@"
                         }
                       },
                       "kind": "Primary",
@@ -510,7 +508,7 @@ expression: "zizmor().offline(true).input(input_under_test(\"several-vulnerabili
             }
           ],
           "message": {
-            "text": "code injection via template expansion"
+            "text": "code injection via template expansion: may expand into attacker-controllable code"
           },
           "properties": {
             "zizmor/confidence": "High",

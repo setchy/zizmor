@@ -12,7 +12,80 @@ Legend:
 
 | Type     | Examples         | Introduced in | Works offline  | Auto-fixes available | Configurable |
 |----------|------------------|---------------|----------------|--------------------|--------------|
-| Workflow, Action, Dependabot | Links to vulnerable examples | Added to `zizmor` in this version | The audit works with `--offline` | The audit supports auto-fixes when used in the `--fix` mode | The audit supports custom configuration |
+| Workflow, Action, Dependabot | Links to vulnerable examples | Added to `zizmor` in this version | The audit works with `--offline` | The audit supports auto-fixes | The audit supports custom configuration |
+
+When an audit has auto-fixes available, there are a few possible options:
+
+| Symbol | Meaning |
+|--------|---------|
+| ❌      | Auto-fixes are not available. |
+| ✅     | _Safe_ auto-fixes are available. `--fix` or `--fix=safe` will work. |
+| ⚠️     | _Unsafe_ auto-fixes are available. `--fix=all` or `--fix=unsafe-only` will work. |
+
+## `adhoc-packages`
+
+| Type             | Examples            | Introduced in | Works offline  | Auto-fixes available | Configurable |
+|------------------|---------------------|---------------|----------------|--------------------|--------------|
+| Workflow, Action | [adhoc-packages.yml] | v1.26.0       | ✅             | ❌                 | ❌           |
+
+[adhoc-packages.yml]: https://github.com/zizmorcore/zizmor/blob/main/crates/zizmor/tests/integration/test-data/adhoc-packages.yml
+
+Detects `#!yaml run:` steps that install or manipulate packages in an ad-hoc
+manner, i.e. outside of a managed and locked manifest.
+
+Installing packages directly with commands like `#!bash gem install <pkg>` or
+`#!bash npm install <pkg>` represents a potential risk:
+
+- Packages that are installed in an ad-hoc manner are often not pinned to
+  a specific version, meaning that the installer will often use whatever latest
+  version is available. This makes it easier to accidentally pick up a compromised
+  version of a package in your workflows.
+- Even if a version is specified, the sub-dependencies of a package are
+  typically still unpinned. For example, `#!bash npm install foo@1.2.3`
+  will install a specific version of `foo`, but `foo`'s dependencies
+  will be newly resolved and may undermine the user's intent of a safe
+  cutoff.
+
+Similarly, this audit flags commands like `#!bash bundle add` and `#!bash yarn add`,
+since they mutate the CI's ephemeral lockfile state.
+
+This audit currently detects ad-hoc installation patterns for the following ecosystems and tools:
+
+| Ecosystem | Tools |
+|-----------|-------|
+| JavaScript | `npm`, `yarn`, `pnpm` |
+| Ruby | `gem`, `bundle` |
+
+### Remediation
+
+Add the package to a manifest that produces a lockfile (e.g. a `Gemfile` or
+`package.json`), commit the resulting lockfile, and install via the
+corresponding lockfile-aware command (`#!bash bundle install`, `#!bash npm ci`,
+etc.).
+
+!!! example
+
+    === "Before :warning:"
+
+        ```yaml title="adhoc-packages.yml" hl_lines="6"
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v5.0.0
+              - run: gem install rake
+        ```
+
+    === "After :white_check_mark:"
+
+        ```yaml title="adhoc-packages.yml" hl_lines="6"
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v5.0.0
+              - run: bundle install
+        ```
 
 ## `anonymous-definition`
 
@@ -84,7 +157,7 @@ represents a supply chain risk:
 
 - Any vulnerabilities discovered in the action or reusable workflow *itself*
   are unlikely to be fixed, since the repository is read-only.
-  
+
 Consequently, users are encouraged to avoid dependening on archived repositories
 for actions or reusable workflows.
 
@@ -95,26 +168,26 @@ Depending on the archived repository's functionality, you may be able to:
 - _Remove_ the action/reusable workflow entirely. Actions @actions-rs/cargo,
   for example, can be replaced by directly invoking the correct `#!bash cargo ...`
   command in a `#!yaml run:` step.
-  
+
 - _Replace_ the archived action/reusable workflow with a maintained alternative.
   For example, @actions/setup-ruby can be replaced with @ruby/setup-ruby.
-  
+
 !!! tip
 
     Many archived actions are thin wrappers around GitHub's REST and GraphQL
     APIs. In most cases, you can replace these actions with usage of the
     [`gh` CLI](https://cli.github.com/), which is pre-installed on GitHub-hosted
     runners.
-    
+
     For more information, see [Using GitHub CLI in workflows].
-    
+
     [Using GitHub CLI in workflows]: https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-github-cli
 
 ## `artipacked`
 
 | Type     | Examples         | Introduced in | Works offline  | Auto-fixes available | Configurable |
 |----------|------------------|---------------|----------------|--------------------| -------------|
-| Workflow  | [artipacked.yml] | v0.1.0        | ✅             | ✅               | ❌           |
+| Workflow  | [artipacked.yml] | v0.1.0        | ✅             | ⚠️               | ❌           |
 
 [artipacked.yml]: https://github.com/woodruffw/gha-hazmat/blob/main/.github/workflows/artipacked.yml
 
@@ -137,7 +210,7 @@ unless actually needed.
     when v6.0.0 or higher of @actions/checkout is used. This reflects a
     change in v6.0.0's credential persistence behavior towards a more
     misuse-resistant location.
-    
+
     See orgs/community?179107 for additional information.
 
 Other resources:
@@ -258,52 +331,97 @@ not using `pull_request_target` for auto-merge workflows.
 
 | Type     | Examples                | Introduced in | Works offline  | Auto-fixes available | Configurable |
 |----------|-------------------------|---------------|----------------|--------------------| ---------------|
-| Workflow  | [cache-poisoning.yml]   | v0.10.0       | ✅             | ✅               | ❌  |
+| Workflow  | [cache-poisoning.yml]   | v0.10.0       | ✅             | ⚠️               | ❌  |
 
 [cache-poisoning.yml]: https://github.com/woodruffw/gha-hazmat/blob/main/.github/workflows/cache-poisoning.yml
 
-Detects potential cache-poisoning scenarios in release workflows.
+Detects two common cache-poisoning primitives in GitHub Actions:
 
-Caching and restoring build state is a process eased by utilities provided
-by GitHub, in particular @actions/cache and its "save" and "restore"
-sub-actions. In addition, many of the setup-like actions provided
-by GitHub come with built-in caching functionality, like @actions/setup-node,
-@actions/setup-java and others.
+- Potentially compromised **reads** from caches, within release
+  workflows.
 
-Furthermore, there are many examples of community-driven Actions with built-in
-caching functionality, like @ruby/setup-ruby, @astral-sh/setup-uv,
-@Swatinem/rust-cache. In general, most of them build on top of @actions/toolkit
-for the sake of easily integrating with GitHub cache server at Workflow runtime.
+- Potentially compromised **writes** to caches, via privileged
+  triggers (see [dangerous-triggers](#dangerous-triggers)) with
+  jobs that explicitly enable `#!yaml cache-mode: write` or
+  `#!yaml cache-mode: write-only`.
 
-This vulnerability happens when release workflows leverage build state cached
-from previous workflow executions, in general on top of the aforementioned
-actions or  similar ones. The publication of artifacts usually happens driven
-by trigger events like `release` or events with path filters like `push`
-(e.g. for tags).
+    !!! tip
 
-In such scenarios, an attacker with access to a valid `GITHUB_TOKEN` can use it
-to poison the repository's GitHub Actions caches. That compounds with the
-default behavior of @actions/toolkit during cache restorations, allowing an
-attacker to retrieve payloads from poisoned cache entries, hence achieving code
-execution at Workflow runtime, potentially compromising ready-to-publish
-artifacts.
+        Detection of dangerous cache writes is available in `v1.31.0` and later.
+
+GitHub Actions provides facilities for creating and restoring caches, including
+caches of code and build state. Specifically, the @actions/cache action and
+its "save" and "restore" sub-actions can be used to create and load from
+cache entries.
+
+In addition, many of the setup-like actions provided by GitHub come with built-in
+caching functionality, like @actions/setup-node, @actions/setup-java and others.
+Many third-party actions also provide caching functionality, like @ruby/setup-ruby,
+@astral-sh/setup-uv, and @Swatinem/rust-cache.
+
+When performing a cache poisoning attack, the attacker's goal is to
+compromise a cache via one workflow (the "source") and use it to pivot
+to another, higher-privilege workflow (the "sink").
+
+Typical "source" workflows include those that use a [dangerous trigger](#dangerous-triggers)
+or otherwise enable `#!yaml cache-mode: write` while providing arbitrary
+code execution to external actors. Meanwhile, typical "sink" workflows
+include _release workflows_, since they frequently contain valuable credentials
+or can be used to pivot to other projects via a compromised release.
 
 Other resources:
 
+* [GitHub: Dependency caching reference]
 * [The Monsters in Your Build Cache – GitHub Actions Cache Poisoning]
 * [Cacheract: The Monster in your Build Cache]
 
 ### Remediation
 
+!!! note
+
+    Starting with zizmor 1.31.0, zizmor is aware of GitHub's new
+    [`cache-mode`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#cache-mode)
+    and will fully suppress any cache poisoning
+    findings when `#!yaml cache-mode: none` is effective.
+
 In general, you should avoid using previously cached CI state within workflows
 intended to publish build artifacts:
 
+* First and foremost, disable caching entirely by setting `#!yaml cache-mode: none`
+  at either the workflow or job level in release workflows. Generally speaking, release
+  workflows should not read from the GitHub Actions cache.
+
+    !!! tip
+
+        If you set `#!yaml cache-mode: none`, you're done!
+        You don't need any of the other steps below.
+
 * Remove cache-aware actions like @actions/cache from workflows that produce
   releases, *or*
+
 * Disable cache-aware actions with an `#!yaml if:` condition based on the trigger at
   the step level, *or*
-* Set an action-specific input to disable cache restoration when appropriate,
-  such as `lookup-only` in @Swatinem/rust-cache.
+
+* Set an action-specific input to disable cache restoration when appropriate.
+  Some (non-exhaustive) examples below:
+
+    | Action | Input |
+    |--------|-------|
+    | @Swatinem/rust-cache | `#!yaml lookup-only: true` |
+    | @actions/setup-node | `#!yaml package-manager-cache: false` |
+    | @astral-sh/setup-uv | `#!yaml enable-cache: false` |
+
+In addition to the above, the `cache-poisoning` audit is aware of several common patterns
+that _conditionally disable_ caching. For example, if you're publishing via a `release` trigger
+or a tag-push event, you can write something like the following to disable caching for just
+that case:
+
+```yaml
+uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+with:
+  # only enable the cache if the ref is not a tag
+  enable-cache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+```
 
 ## `concurrency-limits`
 
@@ -320,6 +438,10 @@ concurrently, even when the new runs fully supersede the old. This can be a
 resource waste vector for attackers, particularly on billed runners. Separately,
 it can be a source of subtle race conditions when attempting to locate artifacts
 by workflow and job identifiers, rather than run IDs.
+
+!!! note
+
+    This is a `--pedantic` only audit, as it is pretty noisy for the average user.
 
 Other resources:
 
@@ -356,6 +478,11 @@ This audit checks for some of the biggest offenders:
 
 * `pull_request_target`
 * `workflow_run`
+* `issue_comment`
+
+!!! note
+
+    This audit flags `issue_comment` as of `v1.31.0`.
 
 These triggers are dangerous because they run in the context of the
 *target repository* rather than the *fork repository*, while also being
@@ -392,6 +519,7 @@ Some general pointers:
 
 * Replace `workflow_run` triggers with `workflow_call`: this will require
   re-tooling the workflow to be a [reusable workflow].
+
 * Replace `pull_request_target` with `pull_request`, unless you *absolutely*
   need repository write permissions (e.g. to leave a comment or make
   other changes to the upstream repo).
@@ -400,6 +528,9 @@ Some general pointers:
     pull requests from external forks. If you only expect pull requests from
     branches within the same repository, or if you are fine with some functionality
     not working for external pull requests, prefer `pull_request`.
+
+* Consider replacing `issue_comment` based developer workflows with workflows
+  that require a privileged user to add a label to an issue or pull request.
 
 * Automation for Dependabot pull requests can be implemented using `pull_request`,
   but requires setting dedicated [Dependabot secrets]
@@ -443,14 +574,13 @@ Some general pointers:
 Detects missing or insufficient `cooldown` settings in Dependabot configuration
 files.
 
-!!! note
-    Some package ecosystems do not support cooldown configuration in Dependabot.
-    This audit will not produce findings for those ecosystems.
+!!! tip
 
-By default, Dependabot does not perform any "cooldown" on dependency updates.
-In other words, a regularly scheduled Dependabot run may perform an update on a
-dependency that was just released moments before the run began. This presents
-both stability and supply-chain security risks:
+    By default, Dependabot performs a three day "cooldown" on dependency updates.
+    `zizmor`, however, recommends a cooldown of seven days by default.
+
+Performing updates without an appropriate cooldown presents both stability
+and supply-chain security risks:
 
 * **Stability**: updating to the newest version of a dependency immediately after its
   release increases the risk of breakage, since new releases may contain
@@ -460,19 +590,6 @@ both stability and supply-chain security risks:
   down by the packaging ecosystem relatively quickly. Updating immediately to
   a newly released version increases the risk of automatically pulling in
   a compromised version before it can be taken down.
-
-To mitigate these risks, Dependabot supports per-updater `cooldown` settings.
-However, these settings are not enabled by default; users **must** explicitly
-enable them.
-
-!!! tip
-
-    Dependabot's `multi-ecosystem-groups` feature does not interact well
-    with `cooldown`: if you use the two together, Dependabot will only create
-    an update for _one_ ecosystem for each cooldown period, even if multiple 
-    ecosystems have new versions available. See #1501 for context.
-    
-    zizmor will flag these cases with a pedantic finding.
 
 Other resources:
 
@@ -525,7 +642,7 @@ In general, you should enable `cooldown` for all updaters.
 
 | Type     | Examples                | Introduced in | Works offline  | Auto-fixes available | Configurable |
 |----------|-------------------------|---------------|----------------|--------------------| ---------------|
-| Dependabot  | [dependabot-execution/]       | v1.15.0       | ✅             | ✅                | ❌  |
+| Dependabot  | [dependabot-execution/]       | v1.15.0       | ✅             | ⚠️                | ❌  |
 
 [dependabot-execution/]: https://github.com/zizmorcore/zizmor/blob/main/crates/zizmor/tests/integration/test-data/dependabot-execution/
 
@@ -784,6 +901,46 @@ for details.
 Either remove the offending `#!yaml uses:` clause or, if intended, add it to
 your [configuration](#forbidden-uses-configuration).
 
+## `github-app`
+
+| Type     | Examples                | Introduced in | Works offline  | Auto-fixes available | Configurable |
+|----------|-------------------------|---------------|----------------|--------------------| ---------------|
+| Workflow, Action  | [github-app.yml]       | v1.25.0        | ✅             | ❌                 | ❌  |
+
+[github-app.yml]: https://github.com/zizmorcore/zizmor/blob/main/crates/zizmor/tests/integration/test-data/github-app.yml
+
+Detects dangerous usages of GitHub App installation tokens.
+
+GitHub Apps provide an alternative authentication mechanism to
+GitHub Actions' built-in `secrets.GITHUB_TOKEN`. Typically, users request an
+installation token for a GitHub App via @actions/create-github-app-token
+and then use that token where the default `secrets.GITHUB_TOKEN` would have been
+used.
+
+There is nothing _inherently_ insecure about GitHub App installation tokens.
+However, there are a handful of ways to misuse actions (like @actions/create-github-app-token)
+that issue them:
+
+* Explicitly disabling revocation of the token, e.g. with `#!yaml skip-token-revoke: true`.
+  This prevents GitHub Actions from revoking the token as a post-run step,
+  which often unnecessarily extends the token's validity.
+
+* Issuing a token with access to _all_ of the installation's repositories,
+  instead of the specific repository (or repositories) being operated on.
+  For example, in @actions/create-github-app-token, using `#!yaml owner: ...`
+  **without** `#!yaml repositories: ...` will issue a token with access to all repositories under the owner.
+
+* Issuing a token with access to all of the installation's permissions,
+  instead of the specific permissions needed for the operation being performed.
+  For example, by default, @actions/create-github-app-token issues tokens with
+  all permissions that the GitHub App has been granted during installation, which can be much broader than the operation actually needs.
+
+### Remediation
+
+When using GitHub App installation tokens, ensure that your token only lives
+for as long as it absolutely needs to, and is only issued with access to the
+exact repositories and permissions it needs.
+
 ## `github-env`
 
 | Type     | Examples           | Introduced in | Works offline  | Auto-fixes available | Configurable |
@@ -897,11 +1054,11 @@ Use [encrypted secrets] instead of hardcoded credentials.
 
 | Type     | Examples              | Introduced in | Works offline  | Auto-fixes available | Configurable |
 |----------|-----------------------|---------------|----------------|--------------------|---------------|
-| Workflow, Action  | [impostor-commit.yml] | v0.1.0        | ❌             | ✅                 | ❌  |
+| Workflow, Action, pre-commit  | [impostor-commit.yml] | v0.1.0        | ❌             | ✅                 | ❌  |
 
 [impostor-commit.yml]: https://github.com/woodruffw/gha-hazmat/blob/main/.github/workflows/impostor-commit.yml
 
-Detects commits within a repository action's network that are not present on
+Detects commits within a repository Git's network that are not present on
 the repository itself, also known as "impostor" commits.
 
 GitHub represents a repository and its forks as a "network" of commits.
@@ -910,8 +1067,8 @@ that exists only in a fork can be referenced via its parent's
 `owner/repo` slug, and vice versa.
 
 GitHub's network-of-forks design can be used to obscure a commit's true origin
-in a fully-pinned `#!yaml uses:` workflow reference. This can be used by an attacker
-to surreptitiously introduce a backdoored action into a victim's workflows(s).
+in a fully-pinned repository reference. This can be used by an attacker
+to surreptitiously introduce malicious code into a victim's workflows(s).
 
 A notable historical example of this is github/dmca@565ece486c7c1652754d7b6d2b5ed9cb4097f9d5,
 which appears to be on @github/dmca is but really on a fork (with an impersonated
@@ -937,7 +1094,7 @@ within an authentic commit (or an authentic tag/branch reference).
 
 | Type     | Examples                | Introduced in | Works offline  | Auto-fixes available | Configurable |
 |----------|-------------------------|---------------|----------------|--------------------| ---------------|
-| Workflow, Action  | [insecure-commands.yml] | v0.5.0        | ✅             | ✅       | ❌  |
+| Workflow, Action  | [insecure-commands.yml] | v0.5.0        | ✅             | ⚠️       | ❌  |
 
 [insecure-commands.yml]: https://github.com/woodruffw/gha-hazmat/blob/main/.github/workflows/insecure-commands.yml
 
@@ -981,11 +1138,53 @@ In general, users should use [GitHub Actions environment files]
             echo "$HOME/.local/my-bin" >> "$GITHUB_PATH"
         ```
 
+## `insecure-url-scheme`
+
+| Type             | Examples                       | Introduced in | Works offline  | Auto-fixes available | Configurable |
+|------------------|--------------------------------|---------------|----------------|--------------------| ---------------|
+| pre-commit | [insecure-url-scheme/.pre-commit-config.yml] | v1.29.0        | ✅             |  ❌                | ❌  |
+
+[insecure-url-scheme/.pre-commit-config.yml]: https://github.com/zizmorcore/zizmor/blob/main/crates/zizmor/tests/integration/test-data/insecure-url-scheme/.pre-commit-config.yml
+
+!!! important
+
+    At the moment, this audit is limited to just the `#!yaml repo:` fields within
+    pre-commit configuration files.
+
+    It may be extended in the future.
+
+!!! important
+
+    At the moment, this audit only flags a subset of known-insecure schemes.
+
+    Other schemes may be flagged in the future.
+
+Detects uses of insecure schemes in URLs.
+
+A URL's "scheme" is its protocol component. For example, `https://github.com` has
+a scheme of `https`, indicating the HTTPS protocol.
+
+A scheme is considered "insecure" by this audit if it acts as a plaintext transport,
+or is known to be fundamentally insecure. For example, HTTP (_not_ HTTPS) is considered
+insecure because it sends requests and responses without transport-layer integrity
+and encryption.
+
+### Remediation
+
+A URL that uses an insecure scheme can often be rewritten to use a secure one.
+
+The following table shows insecure schemes and their recommended alternatives:
+
+| Insecure | Secure |
+| -------- | ------ |
+| HTTP (`http://`) | HTTPS (`https://`) |
+| git (`git://`) | SSH (`ssh://`) or HTTPS (`https://`) |
+
 ## `known-vulnerable-actions`
 
 | Type             | Examples                       | Introduced in | Works offline  | Auto-fixes available | Configurable |
 |------------------|--------------------------------|---------------|----------------|--------------------| ---------------|
-| Workflow, Action | [known-vulnerable-actions.yml] | v0.1.0        | ❌             | ✅                 | ❌  |
+| Workflow, Action | [known-vulnerable-actions.yml] | v0.1.0        | ❌             | ⚠️                 | ❌  |
 
 [known-vulnerable-actions.yml]: https://github.com/woodruffw/gha-hazmat/blob/main/.github/workflows/known-vulnerable-actions.yml
 
@@ -1000,6 +1199,40 @@ injection via [template injection].
 
 [template injection]: #template-injection
 
+### Configuration { #known-vulnerable-actions-configuration }
+
+!!! tip
+
+    `known-vulnerable-actions` is configurable in `v1.26.0` and later.
+
+#### `rules.known-vulnerable-actions.config.allow`
+
+_Type_: `list`
+
+The `rules.known-vulnerable-actions.config.allow` allows users to suppress findings
+for specific vulnerabilities, by advisory ID.
+
+!!! example
+    To suppress [GHSA-5wxr-w449-57cm](https://github.com/advisories/GHSA-5wxr-w449-57cm):
+
+    ```yaml title="zizmor.yml"
+    rules:
+      known-vulnerable-actions:
+        config:
+          allow:
+            - GHSA-5wxr-w449-57cm
+    ```
+
+!!! danger
+
+    Users **must fully understand** the implications of a vulnerability before allowlisting it.
+
+    When in doubt, **do not** allowlist a vulnerability. Instead, either remove it or upgrade
+    to a fixed version (if available).
+
+By default, no vulnerabilities are allowlisted, meaning that all known vulnerabilities
+will produce findings.
+
 ### Remediation
 
 If the vulnerability is applicable to your use: upgrade to a fixed version of
@@ -1009,7 +1242,7 @@ the action if one is available, or remove the action's usage entirely.
 
 | Type     | Examples                | Introduced in | Works offline  | Auto-fixes available | Configurable |
 |----------|-------------------------|---------------|----------------|--------------------| ---------------|
-| Workflow, Action  | N/A   | v1.21.0        | ✅             | ✅                 | ❌  |
+| Workflow, Action  | N/A   | v1.21.0        | ✅             | ❌                 | ❌  |
 
 Checks for usages of GitHub Actions features that are considered "misfeatures."
 
@@ -1019,9 +1252,9 @@ Misfeatures include:
   dependencies directly into a global (user or system-level) environment,
   which is both difficult to audit and is likely to cause broken
   resolutions.
-  
+
     !!! note
-  
+
         See actions/setup-python#1201 and [PEP 668](https://peps.python.org/pep-0668/)
         for additional context.
 
@@ -1031,7 +1264,7 @@ Misfeatures include:
   since 2019.
 
     !!! note
-  
+
         Prior to `v1.21.0`, this check was performed by the [`obfuscation`](#obfuscation) audit.
 
 * Use of non-"well-known" shells, i.e. shells other than those
@@ -1072,7 +1305,7 @@ Address the misfeature by removing or replacing its usage.
             steps:
               - name: Setup Python
                 uses: actions/setup-python@v6
-              
+
               - name: Install package
                 run: |
                   python -m venv .env
@@ -1083,7 +1316,7 @@ Address the misfeature by removing or replacing its usage.
 
 | Type     | Examples                | Introduced in | Works offline  | Auto-fixes available | Configurable |
 |----------|-------------------------|---------------|----------------|--------------------| ---------------|
-| Workflow, Action  | N/A   | v1.7.0        | ✅             | ✅                 | ❌  |
+| Workflow, Action  | N/A   | v1.7.0        | ✅             | ⚠️                 | ❌  |
 
 Checks for obfuscated usages of GitHub Actions features.
 
@@ -1231,22 +1464,31 @@ Switch to hash-pinned actions.
 
 | Type     | Examples                | Introduced in | Works offline  | Auto-fixes available | Configurable |
 |----------|-------------------------|---------------|----------------|--------------------| ---------------|
-| Workflow, Action  | [ref-version-mismatch.yml] | v1.14.0       | ✅             | ✅                 | ❌  |
+| Workflow, Action  | [ref-version-mismatch.yml] | v1.14.0       | ✅             | ⚠️                 | ❌  |
 
 [ref-version-mismatch.yml]: https://github.com/zizmorcore/zizmor/blob/main/crates/zizmor/tests/integration/test-data/ref-version-mismatch.yml
 
-Detects `#!yaml uses:` clauses where the action is hash-pinned, but the associated
-tag comment (used by tools like Dependabot) does not match the pinned commit.
+Detects `#!yaml uses:` clauses where a hash-pinned action's version comment
+(used by tools like Dependabot) is mismatched with the pinned commit, or
+missing entirely.
 
-This can happen innocently when a user (or automation) updates a
-hash-pinned `#!yaml uses:` clause to a newer commit, but fails to update the
-associated tag comment. When this happens, tools like Dependabot will silently
-ignore the comment instead of refreshing it on subsequent updates, making
-it progressively more out-of-date over time.
+This can happen innocently when a user (or automation) updates a hash-pinned
+`#!yaml uses:` clause to a newer commit but forgets to update the associated
+version comment. It can also happen when an action is pinned directly to a
+commit hash without any version comment at all.
+
+When the comment is stale, tools like Dependabot may silently ignore it instead
+of refreshing it on subsequent updates, causing it to drift further out of
+date. When the comment is missing, humans lose an easy indication of which
+version is in use.
+
+Missing version comments are reported only with the pedantic persona. If a
+different inline comment is already present, zizmor reports the finding but
+does not rewrite that comment automatically.
 
 ### Remediation
 
-Update the tag comment to match the pinned commit. Tools like
+Update or add the tag comment so that it matches the pinned commit. Tools like
 @suzuki-shunsuke/pinact may be able to do this automatically for you.
 
 !!! example
@@ -1269,6 +1511,28 @@ Update the tag comment to match the pinned commit. Tools like
             runs-on: ubuntu-latest
             steps:
               - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        ```
+
+!!! example
+
+    === "Before :warning:"
+
+        ```yaml title="ref-version-mismatch.yml" hl_lines="5"
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        ```
+
+    === "After :white_check_mark:"
+
+        ```yaml title="ref-version-mismatch.yml" hl_lines="5"
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         ```
 
 ## `secrets-inherit`
@@ -1351,7 +1615,7 @@ the risk of secrets being exposed to untrusted code or compromised workflows.
     particular, as of March 2026 environment secrets do not interact correctly
     with reusable workflows unless the caller workflow uses `secrets: inherit`,
     which is itself flagged by [secrets-inherit](./audits.md#secrets-inherit).
-    
+
 ### Remediation
 
 In general, secrets should be configured at the environment level, and only
@@ -1365,7 +1629,7 @@ the job or jobs that need a secret should use the corresponding environment.
 
     You **must** move your secrets into the environment's secrets (and remove
     them from the repo/org-wide secrets) in order for this to be effective.
-    
+
 !!! example
 
     === "Before :warning:"
@@ -1397,7 +1661,7 @@ the job or jobs that need a secret should use the corresponding environment.
 
 !!! tip
 
-    `secrets-outside-env` is configurable in `v1.24.0` and later. 
+    `secrets-outside-env` is configurable in `v1.24.0` and later.
 
 #### `rules.secrets-outside-env.config.allow`
 
@@ -1445,7 +1709,9 @@ GitHub supports self-hosted runners, which behave similarly to GitHub-hosted
 runners but use client-managed compute resources.
 
 Self-hosted runners are very hard to secure by default, which is why
-GitHub does not recommend their use in public repositories.
+GitHub does not recommend their use in public repositories. This
+audit can flag self-hosted runners provided by services like [runs-on],
+[namespace] and others.
 
 Other resources:
 
@@ -1472,6 +1738,64 @@ there are steps you can take to minimize their risk:
 [GitHub's docs]: https://docs.github.com/en/actions/managing-workflow-runs-and-deployments/managing-workflow-runs/approving-workflow-runs-from-public-forks
 
 [ephemeral ("just-in-time") runners]: https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-just-in-time-runners
+
+## `self-repository`
+
+| Type     | Examples                | Introduced in | Works offline  | Auto-fixes available | Configurable |
+|----------|-------------------------|---------------|----------------|--------------------|--------------|
+| Workflow, Action  | [self-repository.yml]            | v1.30.0        | ✅            | ⚠️                | ❌          |
+
+[self-repository.yml]: https://github.com/zizmorcore/zizmor/blob/main/crates/zizmor/tests/integration/test-data/self-repository.yml
+
+Detects uses of in-repo actions or reusable workflows that don't use GitHub's
+dedicated "self-repository" syntax.
+
+As of July 2026, GitHub supports a new "self-repository" syntax
+(`#!yaml uses: $/...`) when referring to actions or reusable workflows
+within `#!yaml uses:` clauses.
+
+This syntax has security and policy enforcement benefits when compared to
+the old "workspace-relative" (`#!yaml uses: ./...`) syntax:
+
+- Unlike the "workspace-relative" form, the "self-repository" form is not subject
+  to runtime filesystem state, meaning that it can't load an action that was
+  cloned at runtime in a previous step.
+- Using the "self-repository" form makes it possible to enforce a "fully pinned"
+  policy on GitHub itself, as the "self-repository" form is treated as a form
+  pinning whereas the "workspace-relative" form is not.
+
+Other resources:
+
+* [GitHub Blog: Reference same-repository actions with self-repository syntax](https://github.blog/changelog/2026-07-30-reference-same-repository-actions-with-self-repository-syntax/)
+* [Bypassing GitHub Actions policies in the dumbest way possible](https://blog.yossarian.net/2025/06/11/github-actions-policies-dumb-bypass)
+
+### Remediation
+
+Replace any workspace-relative `#!yaml uses:` clause with its self-repository equivalent.
+
+For example:
+
+!!! example
+
+    === "Before :warning:"
+
+        ```yaml title="self-repository.yml" hl_lines="5"
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: ./my-action
+        ```
+
+    === "After :white_check_mark:"
+
+        ```yaml title="self-repository.yml" hl_lines="5"
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: $/my-action
+        ```
 
 ## `stale-action-refs`
 
@@ -1508,7 +1832,7 @@ which points to a Git tag.
 
 | Type     | Examples                | Introduced in | Works offline  | Auto-fixes available | Configurable |
 |----------|-------------------------|---------------|----------------|--------------------| ---------------|
-| Workflow, Action  | N/A            | v1.23.0        | ✅             | ❌                | ❌  |  
+| Workflow, Action  | N/A            | v1.23.0        | ✅             | ❌                | ❌  |
 
 
 Detects actions that are known to be "superfluous," i.e. perform an operation already provided by GitHub's own runner images.
@@ -1530,9 +1854,15 @@ The following table lists some common superfluous actions and their recommended 
 | @elgohr/Github-Release-Action | `gh release create` |
 | @peter-evans/create-pull-request | `gh pr create` |
 | @peter-evans/create-or-update-comment | `gh pr comment` or `gh issue comment` |
+| @dacbd/create-issue-action | `gh issue create` |
+| @actions-ecosystem/action-add-labels | `gh issue edit --add-label` or `gh pr edit --add-label` |
+| @actions-ecosystem/action-remove-labels | `gh issue edit --remove-label` or `gh pr edit --remove-label` |
 | @svenstaro/upload-release-action | `gh release create` and `gh release upload` |
 | @addnab/docker-run-action | `docker run` |
+| @sergeysova/jq-action | `jq <...>` |
 | @dtolnay/rust-toolchain | `rustup` |
+| @stefanzweifel/git-auto-commit-action | `git add`, `git commit`, and `git push` |
+| @EndBug/add-and-commit | `git add`, `git commit`, and `git push` |
 
 !!! example
 
@@ -1562,7 +1892,7 @@ The following table lists some common superfluous actions and their recommended 
 
 | Type     | Examples                 | Introduced in | Works offline  | Auto-fixes available | Configurable |
 |----------|--------------------------|---------------|----------------|--------------------| ---------------|
-| Workflow, Action  | [template-injection.yml] | v0.1.0        | ✅             | ✅        | ❌  |
+| Workflow, Action  | [template-injection.yml] | v0.1.0        | ✅             | ⚠️        | ❌  |
 
 [template-injection.yml]: https://github.com/woodruffw/gha-hazmat/blob/main/.github/workflows/template-injection.yml
 
@@ -1647,6 +1977,56 @@ shell quoting/expansion rules.
           env:
             ISSUE_TITLE: ${{ github.event.issue.title }}
         ```
+
+## `typosquat-uses`
+
+| Type     | Examples         | Introduced in | Works offline  | Auto-fixes available | Configurable |
+|----------|------------------|---------------|----------------|--------------------|--------------|
+| Workflow, Action | [typosquat-uses.yml] | v1.26.0        | ✅             | ❌                 | ❌           |
+
+[typosquat-uses.yml]: https://github.com/zizmorcore/zizmor/blob/main/crates/zizmor/tests/integration/test-data/typosquat-uses.yml
+
+Detects `#!yaml uses:` clauses that reference an action whose `owner/repo`
+slug is a close textual variant of a well-known action, but is owned by a
+different account.
+
+Typosquatting attacks rely on a developer mistyping or copy-pasting a slightly
+wrong name (`action/checkout` instead of `actions/checkout`, `dokcer/login-action`
+instead of `docker/login-action`). If an attacker registers the misspelled
+namespace, the workflow will fetch and execute their code.
+
+This audit compares each `#!yaml uses:` slug against a baked-in corpus of
+popular actions using the [typomania] library. A finding is raised when the
+slug is one omitted, repeated, swapped, or substituted character away from a
+corpus entry **and** the owner differs from the legitimate action's owner.
+Near-misses within the same owner (for example `actions/chckout`) are not
+reported, since the legitimate organisation already controls that namespace
+and the reference will simply fail at runtime.
+
+[typomania]: https://github.com/rustfoundation/typomania
+
+When run offline, findings are reported at low confidence since zizmor cannot
+tell whether the misspelled repository actually exists. When a GitHub token is
+available, zizmor checks whether the slug resolves to a live repository and
+raises confidence to high if it does.
+
+### Remediation
+
+Correct the `#!yaml uses:` reference to point at the intended action.
+
+=== "Before"
+
+    ```yaml title="typosquat.yml" hl_lines="3"
+    - name: checkout
+      uses: action/checkout@v4
+    ```
+
+=== "After"
+
+    ```yaml title="typosquat.yml" hl_lines="3"
+    - name: checkout
+      uses: actions/checkout@v4
+    ```
 
 ## `undocumented-permissions`
 
@@ -1783,11 +2163,50 @@ by running `#!bash docker inspect redis:7.4.3 --format='{{.RepoDigests}}'`.
               - run: "echo pinned container!"
         ```
 
+## `unpinned-tools`
+
+| Type     | Examples                | Introduced in | Works offline  | Auto-fixes available | Configurable |
+|----------|-------------------------|---------------|----------------|--------------------|--------------|
+| Workflow, Action  | [unpinned-tools.yml]  | v1.25.0        | ✅            |  ❌               | ❌          |
+
+[unpinned-tools.yml]: https://github.com/woodruffw/gha-hazmat/blob/main/.github/workflows/unpinned-tools.yml
+
+Detects certain `#!yaml uses:` steps where the referenced action may use an unpinned external
+tool at runtime.
+
+Even though the referenced action may itself by pinned, the action's configuration may still
+cause it to fetch the "latest" version of the tools used by it. At the moment, this audit only applies
+to a set of known actions with such behavior:
+
+- @aquasecurity/setup-trivy
+- @1password/load-secrets-action
+
+For these actions, zizmor reports a finding when:
+
+- the action is used without a `with.version` input (causing `latest` to be used as a default)
+- `with.version` is set to `latest`
+
+!!! note
+
+    This audit does not flag actions that perform *interior* hash-pinning, e.g.
+    that fetch the "latest" version of a tool but only after validating it against
+    a known-good hash.
+
+    For example, @zizmorcore/zizmor-action defaults to the "latest" version of
+    `zizmor` relative to the action's release, and that "latest" version is
+    [pinned in the action itself](https://github.com/zizmorcore/zizmor-action/blob/main/support/versions),
+    so no `unpinned-tools` finding is emitted.
+
+### Remediation
+
+When using one of the known actions, set `with.version` to a specific tool version instead of relying on
+default versions or `latest`.
+
 ## `unpinned-uses`
 
 | Type             | Examples         | Introduced in | Works offline  | Auto-fixes available | Configurable |
 |------------------|------------------|---------------|----------------|--------------------|--------------|
-| Workflow, Action | [unpinned.yml]   | v0.4.0        | ✅             | ✅                | ✅           |
+| Workflow, Action | [unpinned.yml]   | v0.4.0        | ✅             | ⚠️                | ✅           |
 
 [unpinned.yml]: https://github.com/woodruffw/gha-hazmat/blob/main/.github/workflows/unpinned.yml
 
@@ -1922,7 +2341,7 @@ regardless of definition order.
 
     You can use `zizmor`'s [fix mode](./usage.md#auto-fixing-results) to
     automatically hash-pin your workflows and actions.
-  
+
     Alternatively, there are several third-party tools that can automatically
     hash-pin your workflows and actions for you:
 
@@ -2227,6 +2646,72 @@ Other resources:
                 if: contains(fromJSON('["refs/heads/main", "refs/heads/develop"]'), github.ref)
         ```
 
+## `unsound-ternary`
+
+| Type     | Examples              | Introduced in | Works offline | Auto-fixes available | Configurable |
+|----------|-----------------------|---------------|---------------|--------------------|--------------|
+| Workflow, Action | [issue-746-repro.yml] | v1.26.0      | ✅            | ❌                 | ❌           |
+
+[issue-746-repro.yml]: https://github.com/zizmorcore/zizmor/blob/main/crates/zizmor/tests/integration/test-data/unsound-ternary/issue-746-repro.yml
+
+Detects GitHub Actions expressions that use `&&` and `||` as a pseudo-ternary
+when the "true" value can evaluate to a falsy value.
+
+It's common to imitate the behavior of a ternary in GitHub Actions expressions
+like this:
+
+```yaml
+${{ condition && value || fallback }}
+```
+
+This only behaves like a ternary when `value` is truthy. If `value` is falsy,
+the expression falls through to `fallback` even when `condition` is true. For
+example, the following expression evaluates to `bar` when `foo` is truthy:
+
+```yaml
+${{ foo && '' || 'bar' }}
+```
+
+This audit detects pseudo-ternaries where the true arm statically evaluates to
+a falsy value, including `#!yaml ''`, `#!yaml 0`, `#!yaml false`, and
+`#!yaml null`.
+
+### Remediation
+
+Use the `case(...)` function when a value may be falsy:
+
+```yaml
+${{ case(condition, value, fallback) }}
+```
+
+Alternatively, rewrite the expression so that the true arm cannot be falsy.
+
+!!! example
+
+    === "Before :warning:"
+
+        ```yaml title="unsound-ternary.yml" hl_lines="7"
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: echo "value=${VALUE}"
+                env:
+                  VALUE: ${{ foo && '' || 'bar' }}
+        ```
+
+    === "After :white_check_mark:"
+
+        ```yaml title="unsound-ternary.yml" hl_lines="7"
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: echo "value=${VALUE}"
+                env:
+                  VALUE: ${{ case(foo, '', 'bar') }}
+        ```
+
 
 ## `use-trusted-publishing`
 
@@ -2301,11 +2786,11 @@ once it's configured:
     ---
 
     See: [Trusted publishing for npm packages]
-    
+
 -   :simple-nuget:{.lg .middle} .NET (nuget.org)
 
     ---
-    
+
     Usage: @NuGet/login
 
     See: [Trusted publishing for nuget.org]
@@ -2352,3 +2837,6 @@ once it's configured:
 [GitHub: Safeguard your containers with new container signing capability in GitHub Actions]: https://github.blog/security/supply-chain-security/safeguard-container-signing-capability-actions/
 [Pwning the Entire Nix Ecosystem]: https://ptrpa.ws/nixpkgs-actions-abuse
 [Guidelines on green software practices for GitHub Actions CI workflows]: https://github.com/Cambridge-ICCS/green-ci
+[runs-on]: https://runs-on.com
+[namespace]: https://namespace.so/docs/solutions/github-actions
+[GitHub: Dependency caching reference]: https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#defaults

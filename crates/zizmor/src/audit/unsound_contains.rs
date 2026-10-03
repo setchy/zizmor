@@ -1,10 +1,11 @@
-use std::ops::Deref;
+use std::ops::Deref as _;
 
 use github_actions_expressions::{
     Expr, SpannedExpr,
     call::{Call, Function},
     context::Context,
     literal::Literal,
+    op::BinExpr,
 };
 use github_actions_models::common::If;
 
@@ -102,17 +103,17 @@ impl UnsoundContains {
                 func: _,
                 args: exprs,
             })
-            | Expr::Context(Context { parts: exprs, .. }) => {
+            | Expr::Context(Context { parts: exprs }) => {
                 Box::new(exprs.iter().flat_map(Self::walk_tree_for_unsound_contains))
             }
             Expr::Index(expr) => Self::walk_tree_for_unsound_contains(expr),
-            Expr::BinOp { lhs, rhs, .. } => {
+            Expr::BinExpr(BinExpr { lhs, rhs, .. }) => {
                 let bc_lhs = Self::walk_tree_for_unsound_contains(lhs);
                 let bc_rhs = Self::walk_tree_for_unsound_contains(rhs);
 
                 Box::new(bc_lhs.chain(bc_rhs))
             }
-            Expr::UnOp { expr, .. } => Self::walk_tree_for_unsound_contains(expr),
+            Expr::UnExpr { expr, .. } => Self::walk_tree_for_unsound_contains(expr),
             _ => Box::new(std::iter::empty()),
         }
     }

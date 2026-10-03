@@ -3,14 +3,14 @@
 [![zizmor](https://img.shields.io/badge/%F0%9F%8C%88-zizmor-white?labelColor=white)](https://zizmor.sh/)
 [![CI](https://github.com/zizmorcore/zizmor/actions/workflows/ci.yml/badge.svg)](https://github.com/zizmorcore/zizmor/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/zizmor)](https://crates.io/crates/zizmor)
-[![Packaging status](https://repology.org/badge/tiny-repos/zizmor.svg)](https://repology.org/project/zizmor/versions)
+[![Packaging status](https://img.shields.io/repology/repositories/zizmor)](https://repology.org/project/zizmor/versions)
 [![GitHub Sponsors](https://img.shields.io/github/sponsors/woodruffw?style=flat&logo=githubsponsors&labelColor=white&color=white)](https://github.com/sponsors/woodruffw)
 [![Discord](https://img.shields.io/badge/Discord-%235865F2.svg?logo=discord&logoColor=white)](https://discord.com/invite/PGU3zGZuGG)
 
-`zizmor` is a static analysis tool for GitHub Actions.
+`zizmor` is a static analysis tool for CI/CD systems.
 
-It can find many common security issues in typical GitHub Actions CI/CD setups,
-including:
+It can find and fix security issues in common CI/CD setups, including GitHub Actions,
+Dependabot, and pre-commit. Some of the things `zizmor` finds:
 
 * Template injection vulnerabilities, leading to attacker-controlled code execution
 * Accidental credential persistence and leakage
@@ -57,34 +57,59 @@ See [our contributing guide!](./CONTRIBUTING.md)
 <caption>Logo-level sponsors</caption>
 <tbody>
 <tr>
-<td align="center" valign="top" width="15%">
+<td align="center" valign="top" width="25%" colspan="2">
 <a href="https://grafana.com/">
 <img src="https://avatars.githubusercontent.com/u/7195757?s=100&v=4" width="100px">
 <br>
 Grafana Labs
 </a>
 </td>
-<td align="center" valign="top" width="15%">
+<td align="center" valign="top" width="25%" colspan="2">
 <a href="https://trailofbits.com/">
 <img src="https://avatars.githubusercontent.com/u/2314423?s=100&v=4" width="100px">
 <br>
 Trail of Bits
 </a>
 </td>
-<td align="center" valign="top" width="15%">
-<a href="https://www.shipfox.io">
-<img src="https://avatars.githubusercontent.com/u/163036520?s=100&v=4" width="100px">
-<br>
-Shipfox
-</a>
-</td>
-<td align="center" valign="top" width="15%">
+<td align="center" valign="top" width="25%" colspan="2">
 <a href="https://kusari.dev">
 <img src="https://avatars.githubusercontent.com/u/105390000?s=100&v=4" width="100px">
 <br>
 Kusari
 </a>
 </td>
+<td align="center" valign="top" width="25%" colspan="2">
+<a href="https://tracebit.com">
+<img src="https://avatars.githubusercontent.com/u/104151585?s=100&v=4" width="100px">
+<br>
+Tracebit
+</a>
+</td>
+</tr>
+<tr>
+<td colspan="1" width="12.5%"></td>
+<td align="center" valign="top" width="25%" colspan="2">
+<a href="https://github.com/coder">
+<img src="https://avatars.githubusercontent.com/u/95932066?s=100&v=4" width="100px">
+<br>
+Coder
+</a>
+</td>
+<td align="center" valign="top" width="25%" colspan="2">
+<a href="https://www.glueckkanja.com/">
+<img src="https://avatars.githubusercontent.com/u/1126622?s=100&v=4" width="100px">
+<br>
+glueckkanja AG
+</a>
+</td>
+<td align="center" valign="top" width="25%" colspan="2">
+<a href="https://prospex.ch/">
+<img src="https://avatars.githubusercontent.com/u/319420253?s=100&v=4" width="100px">
+<br>
+prospex
+</a>
+</td>
+<td colspan="1" width="12.5%"></td>
 </tr>
 </tbody>
 </table>
@@ -96,6 +121,11 @@ Kusari
 <td align="center" valign="top">
 <a href="https://github.com/ariccio">
 Alexander Riccio
+</a>
+</td>
+<td align="center" valign="top">
+<a href="https://github.com/willingc">
+Carol Willing
 </a>
 </td>
 </tr>

@@ -23,6 +23,16 @@
           "items": {
             "$ref": "#/definitions/WorkflowRule"
           }
+        },
+        "remap": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RemapConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -57,6 +67,16 @@
           "items": {
             "$ref": "#/definitions/WorkflowRule"
           }
+        },
+        "remap": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RemapConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -119,9 +139,101 @@
           "items": {
             "$ref": "#/definitions/WorkflowRule"
           }
+        },
+        "remap": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RemapConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false
+    },
+    "KnownVulnerableActionsConfig": {
+      "title": "Configuration for the `known-vulnerable-actions` audit.",
+      "type": "object",
+      "properties": {
+        "allow": {
+          "description": "List of advisory IDs to ignore for this audit.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "allow"
+      ]
+    },
+    "KnownVulnerableActionsRuleConfig": {
+      "description": "Configuration for the `known-vulnerable-actions` audit.",
+      "type": "object",
+      "properties": {
+        "config": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/KnownVulnerableActionsConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "disable": {
+          "type": "boolean",
+          "default": false
+        },
+        "ignore": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WorkflowRule"
+          }
+        },
+        "remap": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RemapConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "RemapConfig": {
+      "type": "object",
+      "properties": {
+        "severity": {
+          "description": "Remaps the audit's severity to the given severity.\n\nIt will apply this severity regardless of what the real severity is, including when an audit\ncan be multiple severities.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RemapSeverity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "RemapSeverity": {
+      "description": "Severity level for use in remap configuration.",
+      "type": "string",
+      "enum": [
+        "informational",
+        "low",
+        "medium",
+        "high"
+      ]
     },
     "RepositoryUsesPattern": {
       "title": "Represents a pattern for matching repository `uses` references.",
@@ -131,6 +243,9 @@
     "RulesConfig": {
       "type": "object",
       "properties": {
+        "adhoc-packages": {
+          "$ref": "#/definitions/BaseRuleConfig"
+        },
         "anonymous-definition": {
           "$ref": "#/definitions/BaseRuleConfig"
         },
@@ -164,6 +279,9 @@
         "forbidden-uses": {
           "$ref": "#/definitions/ForbiddenUsesRuleConfig"
         },
+        "github-app": {
+          "$ref": "#/definitions/BaseRuleConfig"
+        },
         "github-env": {
           "$ref": "#/definitions/BaseRuleConfig"
         },
@@ -176,8 +294,11 @@
         "insecure-commands": {
           "$ref": "#/definitions/BaseRuleConfig"
         },
-        "known-vulnerable-actions": {
+        "insecure-url-scheme": {
           "$ref": "#/definitions/BaseRuleConfig"
+        },
+        "known-vulnerable-actions": {
+          "$ref": "#/definitions/KnownVulnerableActionsRuleConfig"
         },
         "misfeature": {
           "$ref": "#/definitions/BaseRuleConfig"
@@ -201,6 +322,9 @@
           "$ref": "#/definitions/SecretsOutsideEnvRuleConfig"
         },
         "self-hosted-runner": {
+          "$ref": "#/definitions/SelfHostedRunnerRuleConfig"
+        },
+        "self-repository": {
           "$ref": "#/definitions/BaseRuleConfig"
         },
         "stale-action-refs": {
@@ -212,10 +336,16 @@
         "template-injection": {
           "$ref": "#/definitions/BaseRuleConfig"
         },
+        "typosquat-uses": {
+          "$ref": "#/definitions/BaseRuleConfig"
+        },
         "undocumented-permissions": {
           "$ref": "#/definitions/BaseRuleConfig"
         },
         "unpinned-images": {
+          "$ref": "#/definitions/BaseRuleConfig"
+        },
+        "unpinned-tools": {
           "$ref": "#/definitions/BaseRuleConfig"
         },
         "unpinned-uses": {
@@ -228,6 +358,9 @@
           "$ref": "#/definitions/BaseRuleConfig"
         },
         "unsound-contains": {
+          "$ref": "#/definitions/BaseRuleConfig"
+        },
+        "unsound-ternary": {
           "$ref": "#/definitions/BaseRuleConfig"
         },
         "use-trusted-publishing": {
@@ -274,6 +407,80 @@
           "items": {
             "$ref": "#/definitions/WorkflowRule"
           }
+        },
+        "remap": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RemapConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "SelfHostedRunnerConfig": {
+      "description": "Configuration for the `self-hosted-runner` audit.",
+      "type": "object",
+      "properties": {
+        "allow-groups": {
+          "description": "Any Runner Groups the user wants to avoid being flagged,\nusually Runner Groups for Github Large Runners",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "deny-runners": {
+          "description": "Additional runner labels the user want to declare as self-hosted\nand should be flagged by the audit",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "deny-runners",
+        "allow-groups"
+      ]
+    },
+    "SelfHostedRunnerRuleConfig": {
+      "description": "Configuration for the `self-hosted-runner` audit.",
+      "type": "object",
+      "properties": {
+        "config": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SelfHostedRunnerConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "disable": {
+          "type": "boolean",
+          "default": false
+        },
+        "ignore": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WorkflowRule"
+          }
+        },
+        "remap": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RemapConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -309,6 +516,16 @@
           "items": {
             "$ref": "#/definitions/WorkflowRule"
           }
+        },
+        "remap": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RemapConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false

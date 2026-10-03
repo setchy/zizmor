@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use github_actions_models::common::Uses;
 use subfeature::Subfeature;
 use yamlpatch::{Op, Patch};
@@ -5,10 +7,11 @@ use yamlpatch::{Op, Patch};
 use super::{Audit, AuditLoadError, AuditState, audit_meta};
 use crate::audit::AuditError;
 use crate::config::{Config, UsesPolicy};
-use crate::finding::location::{Locatable, Routable};
+use crate::finding::location::{Locatable, Routable as _};
 use crate::finding::{Confidence, Finding, Fix, Persona, Severity};
 use crate::github;
-use crate::models::uses::{RepositoryUsesExt, RepositoryUsesPattern};
+use crate::models::uses::{RepositoryUsesExt as _, RepositoryUsesPattern};
+use crate::models::version::Version;
 use crate::models::workflow::ReusableWorkflowCallJob;
 use crate::models::{
     AsDocument, StepCommon, action::CompositeStep, uses::UsesExt as _, workflow::Step,
@@ -39,11 +42,19 @@ impl UnpinnedUses {
             return None;
         }
 
-        let commit = match client
-            .commit_for_ref(uses.owner(), uses.repo(), uses.git_ref())
-            .await
-        {
-            Ok(Some(commit)) => commit,
+        // Only attempt a fix if the git ref _looks_ like it might be a
+        // version, e.g. `@v1`, `@1.2.3`, etc. Technically we can hash-pin
+        // any symbolic ref, but we don't want to do so automatically for refs
+        // like `@main`, `@stable`, etc. because other tools like Dependabot
+        // and pinact don't handle those gracefully.
+        // The user can always pin manually if they so desire.
+        if Version::parse(uses.git_ref()).is_err() {
+            tracing::debug!("not proposing an auto-fix for a non-version ref: {uses}");
+            return None;
+        }
+
+        let git_ref = match client.lookup_ref(&uses.into(), uses.git_ref()).await {
+            Ok(Some(git_ref)) => git_ref,
             Ok(None) => {
                 tracing::warn!("no commit matching {uses}");
                 return None;
@@ -58,6 +69,19 @@ impl UnpinnedUses {
             }
         };
 
+        // Resolve the commit back to its longest tag; pinning to the full
+        // version avoids any later `ref-version-mismatch` findings when the
+        // major tag is mutated by the upstream.
+        let longest_tag = match client
+            .longest_tag_for_commit(&uses.into(), uses.subpath(), git_ref.commit())
+            .await
+        {
+            Ok(Some(tag)) => Cow::Owned(tag.name),
+            // Our original tag -> commit lookup succeeded, but this reverse lookup
+            // failed, which makes no sense. Just fall back to what we know.
+            _ => Cow::Borrowed(uses.git_ref()),
+        };
+
         let action = if let Some(subpath) = uses.subpath() {
             format!("{}/{}", uses.slug(), subpath)
         } else {
@@ -68,18 +92,20 @@ impl UnpinnedUses {
         // 1. `uses: foo/bar@ref` -> `uses: foo/bar@hashhashhash`
         // 2. A `# <ref>` comment following the `uses:` clause.
         Some(Fix {
-            title: format!("pin {action}@{ref} to {commit}", ref = uses.git_ref()),
+            title: format!("pin {action}@{ref} to {commit}", ref = uses.git_ref(), commit = git_ref.commit()),
             key: parent.location().key,
             disposition: Default::default(),
             patches: vec![
                 Patch {
                     route: parent.route().with_key("uses"),
-                    operation: Op::Replace(format!("{action}@{commit}").into()),
+                    operation: Op::Replace(
+                        format!("{action}@{commit}", commit = git_ref.commit()).into(),
+                    ),
                 },
                 Patch {
                     route: parent.route().with_key("uses"),
                     operation: Op::EmplaceComment {
-                        new: format!("# {ref}", ref = uses.git_ref()).into(),
+                        new: format!("# {longest_tag}").into(),
                     },
                 },
             ],
@@ -97,31 +123,8 @@ impl UnpinnedUses {
             // are fully controlled by the repository anyways.
             // TODO: auditor-level findings instead, perhaps?
             Uses::Local(_) => None,
-            // We don't have detailed policies for `uses: docker://` yet,
-            // in part because evaluating the risk of a tagged versus hash-pinned
-            // Docker image depends on the image and its registry).
-            //
-            // Instead, we produce a blanket finding for unpinned images,
-            // and a pedantic-only finding for unhashed images.
-            Uses::Docker(_) => {
-                if uses.unpinned() {
-                    Some((
-                        "image is not pinned to a tag, branch, or hash ref".into(),
-                        Severity::Medium,
-                        Persona::default(),
-                        None,
-                    ))
-                } else if uses.unhashed() {
-                    Some((
-                        "action is not pinned to a hash".into(),
-                        Severity::Low,
-                        Persona::Pedantic,
-                        None,
-                    ))
-                } else {
-                    None
-                }
-            }
+            // This is handled by the `unpinned-images` audit.
+            Uses::Docker(_) => None,
             Uses::Repository(repo_uses) => {
                 let (pattern, policy) = config.unpinned_uses_policies.get_policy(repo_uses);
 
@@ -185,6 +188,7 @@ impl UnpinnedUses {
             .confidence(Confidence::High)
             .severity(severity)
             .persona(persona)
+            .add_location(parent.location().hidden())
             .add_location(
                 parent
                     .location()
@@ -255,328 +259,5 @@ impl Audit for UnpinnedUses {
             .await?
             .into_iter()
             .collect())
-    }
-}
-
-#[cfg(feature = "gh-token-tests")]
-#[cfg(test)]
-mod tests {
-    use crate::audit::unpinned_uses::UnpinnedUses;
-    use crate::audit::{Audit as _, AuditCore as _};
-    use crate::config::Config;
-    use crate::github;
-    use crate::{
-        models::{AsDocument, workflow::Workflow},
-        registry::input::InputKey,
-    };
-
-    #[tokio::test]
-    async fn test_fix() {
-        let workflow_content = r#"
-name: Test
-on: push
-permissions: {}
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout with ref-pin
-        uses: actions/checkout@v6.0.1
-"#;
-
-        let key = InputKey::local("fakegroup".into(), "test_unpinned_uses.yml", None::<&str>);
-        let workflow = Workflow::from_string(workflow_content.to_string(), key).unwrap();
-
-        let state = crate::state::AuditState::new(
-            false,
-            Some(
-                github::Client::new(
-                    &github::GitHubHost::default(),
-                    &github::GitHubToken::new(&std::env::var("GH_TOKEN").unwrap()).unwrap(),
-                    "/tmp".into(),
-                )
-                .unwrap(),
-            ),
-        );
-
-        let audit = UnpinnedUses::new(&state).unwrap();
-
-        let input = workflow.into();
-        let findings = audit
-            .audit(UnpinnedUses::ident(), &input, &Config::default())
-            .await
-            .unwrap();
-
-        let new_doc = findings[0].fixes[0].apply(input.as_document()).unwrap();
-        insta::assert_snapshot!(new_doc.source(), @"
-
-        name: Test
-        on: push
-        permissions: {}
-        jobs:
-          test:
-            runs-on: ubuntu-latest
-            steps:
-              - name: Checkout with ref-pin
-                uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-        ");
-    }
-
-    #[tokio::test]
-    async fn test_fix_crlf() {
-        let workflow_content = r#"
-name: Test
-on: push
-permissions: {}
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout with ref-pin
-        uses: actions/checkout@v6.0.1
-"#;
-
-        let workflow_content = workflow_content.replace("\n", "\r\n");
-
-        let key = InputKey::local("fakegroup".into(), "test_unpinned_uses.yml", None::<&str>);
-        let workflow = Workflow::from_string(workflow_content.to_string(), key).unwrap();
-
-        let state = crate::state::AuditState::new(
-            false,
-            Some(
-                github::Client::new(
-                    &github::GitHubHost::default(),
-                    &github::GitHubToken::new(&std::env::var("GH_TOKEN").unwrap()).unwrap(),
-                    "/tmp".into(),
-                )
-                .unwrap(),
-            ),
-        );
-
-        let audit = UnpinnedUses::new(&state).unwrap();
-
-        let input = workflow.into();
-        let findings = audit
-            .audit(UnpinnedUses::ident(), &input, &Config::default())
-            .await
-            .unwrap();
-
-        let new_doc = findings[0].fixes[0].apply(input.as_document()).unwrap();
-        insta::assert_snapshot!(new_doc.source(), @"
-
-        name: Test
-        on: push
-        permissions: {}
-        jobs:
-          test:
-            runs-on: ubuntu-latest
-            steps:
-              - name: Checkout with ref-pin
-                uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-        ");
-    }
-
-    #[tokio::test]
-    async fn test_fix_overwrites_comment() {
-        let workflow_content = r#"
-name: Test
-on: push
-permissions: {}
-jobs:
-    test:
-        runs-on: ubuntu-latest
-        steps:
-        - name: Checkout with ref-pin
-          uses: actions/checkout@v6.0.1 # old comment
-"#;
-
-        let key = InputKey::local(
-            "fakegroup".into(),
-            "test_unpinned_uses_overwrites_comment.yml",
-            None::<&str>,
-        );
-        let workflow = Workflow::from_string(workflow_content.to_string(), key).unwrap();
-
-        let state = crate::state::AuditState::new(
-            false,
-            Some(
-                github::Client::new(
-                    &github::GitHubHost::default(),
-                    &github::GitHubToken::new(&std::env::var("GH_TOKEN").unwrap()).unwrap(),
-                    "/tmp".into(),
-                )
-                .unwrap(),
-            ),
-        );
-
-        let audit = UnpinnedUses::new(&state).unwrap();
-        let input = workflow.into();
-        let findings = audit
-            .audit(UnpinnedUses::ident(), &input, &Config::default())
-            .await
-            .unwrap();
-
-        let new_doc = findings[0].fixes[0].apply(input.as_document()).unwrap();
-        insta::assert_snapshot!(new_doc.source(), @"
-
-        name: Test
-        on: push
-        permissions: {}
-        jobs:
-            test:
-                runs-on: ubuntu-latest
-                steps:
-                - name: Checkout with ref-pin
-                  uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-        ");
-    }
-
-    #[tokio::test]
-    async fn test_fix_bizarre_formatting() {
-        let workflow_content = r#"
-name: Test
-on: push
-permissions: {}
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      -
-        uses: actions/checkout@v6.0.1
-"#;
-
-        let key = InputKey::local("fakegroup".into(), "test_unpinned_uses.yml", None::<&str>);
-        let workflow = Workflow::from_string(workflow_content.to_string(), key).unwrap();
-
-        let state = crate::state::AuditState::new(
-            false,
-            Some(
-                github::Client::new(
-                    &github::GitHubHost::default(),
-                    &github::GitHubToken::new(&std::env::var("GH_TOKEN").unwrap()).unwrap(),
-                    "/tmp".into(),
-                )
-                .unwrap(),
-            ),
-        );
-
-        let audit = UnpinnedUses::new(&state).unwrap();
-
-        let input = workflow.into();
-        let findings = audit
-            .audit(UnpinnedUses::ident(), &input, &Config::default())
-            .await
-            .unwrap();
-
-        let new_doc = findings[0].fixes[0].apply(input.as_document()).unwrap();
-        insta::assert_snapshot!(new_doc.source(), @"
-
-        name: Test
-        on: push
-        permissions: {}
-        jobs:
-          test:
-            runs-on: ubuntu-latest
-            steps:
-              -
-                uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-        ");
-    }
-
-    #[tokio::test]
-    async fn test_fix_subpath() {
-        let workflow_content = r#"
-name: Test
-on: push
-permissions: {}
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: bytecodealliance/actions/wasmtime/setup@v1.1.3
-"#;
-
-        let key = InputKey::local(
-            "fakegroup".into(),
-            "test_unpinned_uses_subpath.yml",
-            None::<&str>,
-        );
-        let workflow = Workflow::from_string(workflow_content.to_string(), key).unwrap();
-
-        let state = crate::state::AuditState::new(
-            false,
-            Some(
-                github::Client::new(
-                    &github::GitHubHost::default(),
-                    &github::GitHubToken::new(&std::env::var("GH_TOKEN").unwrap()).unwrap(),
-                    "/tmp".into(),
-                )
-                .unwrap(),
-            ),
-        );
-
-        let audit = UnpinnedUses::new(&state).unwrap();
-
-        let input = workflow.into();
-        let findings = audit
-            .audit(UnpinnedUses::ident(), &input, &Config::default())
-            .await
-            .unwrap();
-
-        let new_doc = findings[0].fixes[0].apply(input.as_document()).unwrap();
-        insta::assert_snapshot!(new_doc.source(), @"
-
-        name: Test
-        on: push
-        permissions: {}
-        jobs:
-          test:
-            runs-on: ubuntu-latest
-            steps:
-              - uses: bytecodealliance/actions/wasmtime/setup@9152e710e9f7182e4c29ad218e4f335a7b203613 # v1.1.3
-        ");
-    }
-
-    #[tokio::test]
-    async fn test_no_fix_for_already_pinned() {
-        let workflow_content = r#"
-name: Test
-on: push
-permissions: {}
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-        - name: Checkout with commit pin
-          uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-"#;
-
-        let key = InputKey::local(
-            "fakegroup".into(),
-            "test_no_fix_for_already_pinned.yml",
-            None::<&str>,
-        );
-        let workflow = Workflow::from_string(workflow_content.to_string(), key).unwrap();
-
-        let state = crate::state::AuditState::new(
-            false,
-            Some(
-                github::Client::new(
-                    &github::GitHubHost::default(),
-                    &github::GitHubToken::new(&std::env::var("GH_TOKEN").unwrap()).unwrap(),
-                    "/tmp".into(),
-                )
-                .unwrap(),
-            ),
-        );
-
-        let audit = UnpinnedUses::new(&state).unwrap();
-        let input = workflow.into();
-        let findings = audit
-            .audit(UnpinnedUses::ident(), &input, &Config::default())
-            .await
-            .unwrap();
-
-        assert!(findings.is_empty());
     }
 }

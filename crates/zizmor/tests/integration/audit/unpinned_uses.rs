@@ -17,23 +17,7 @@ fn test_unpinned_uses_pedantic() -> Result<()> {
        |
        = note: audit confidence → High
 
-    warning[unpinned-uses]: unpinned action reference
-      --> @@INPUT@@:21:24
-       |
-    21 |       - uses: docker://ubuntu
-       |                        ^^^^^^ image is not pinned to a tag, branch, or hash ref
-       |
-       = note: audit confidence → High
-
-    warning[unpinned-uses]: unpinned action reference
-      --> @@INPUT@@:27:24
-       |
-    27 |       - uses: docker://ghcr.io/pypa/gh-action-pypi-publish
-       |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ image is not pinned to a tag, branch, or hash ref
-       |
-       = note: audit confidence → High
-
-    3 findings: 0 informational, 0 low, 2 medium, 1 high
+    1 finding: 0 informational, 0 low, 0 medium, 1 high
     "
     );
 
@@ -55,23 +39,7 @@ fn test_unpinned_uses_default() -> Result<()> {
        |
        = note: audit confidence → High
 
-    warning[unpinned-uses]: unpinned action reference
-      --> @@INPUT@@:21:24
-       |
-    21 |       - uses: docker://ubuntu
-       |                        ^^^^^^ image is not pinned to a tag, branch, or hash ref
-       |
-       = note: audit confidence → High
-
-    warning[unpinned-uses]: unpinned action reference
-      --> @@INPUT@@:27:24
-       |
-    27 |       - uses: docker://ghcr.io/pypa/gh-action-pypi-publish
-       |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ image is not pinned to a tag, branch, or hash ref
-       |
-       = note: audit confidence → High
-
-    3 findings: 0 informational, 0 low, 2 medium, 1 high
+    1 finding: 0 informational, 0 low, 0 medium, 1 high
     "
     );
 
@@ -436,7 +404,7 @@ fn test_invalid_wrong_policy_object() -> Result<()> {
             .input(input_under_test("unpinned-uses/menagerie-of-uses.yml"))
             .run()?,
         @"
-    🌈 zizmor v@@VERSION@@
+     INFO zizmor: 🌈 zizmor v@@VERSION@@
     fatal: no audit was performed
     error: configuration error in @@CONFIG@@
       |
@@ -464,7 +432,7 @@ fn test_invalid_policy_syntax_1() -> Result<()> {
             .input(input_under_test("unpinned-uses/menagerie-of-uses.yml"))
             .run()?,
         @"
-    🌈 zizmor v@@VERSION@@
+     INFO zizmor: 🌈 zizmor v@@VERSION@@
     fatal: no audit was performed
     error: configuration error in @@CONFIG@@
       |
@@ -492,7 +460,7 @@ fn test_invalid_policy_syntax_2() -> Result<()> {
             .input(input_under_test("unpinned-uses/menagerie-of-uses.yml"))
             .run()?,
         @"
-    🌈 zizmor v@@VERSION@@
+     INFO zizmor: 🌈 zizmor v@@VERSION@@
     fatal: no audit was performed
     error: configuration error in @@CONFIG@@
       |
@@ -520,7 +488,7 @@ fn test_invalid_policy_syntax_3() -> Result<()> {
             .input(input_under_test("unpinned-uses/menagerie-of-uses.yml"))
             .run()?,
         @"
-    🌈 zizmor v@@VERSION@@
+     INFO zizmor: 🌈 zizmor v@@VERSION@@
     fatal: no audit was performed
     error: configuration error in @@CONFIG@@
       |
@@ -548,7 +516,7 @@ fn test_invalid_policy_syntax_4() -> Result<()> {
             .input(input_under_test("unpinned-uses/menagerie-of-uses.yml"))
             .run()?,
         @"
-    🌈 zizmor v@@VERSION@@
+     INFO zizmor: 🌈 zizmor v@@VERSION@@
     fatal: no audit was performed
     error: configuration error in @@CONFIG@@
       |
@@ -576,7 +544,7 @@ fn test_invalid_policy_syntax_5() -> Result<()> {
             .input(input_under_test("unpinned-uses/menagerie-of-uses.yml"))
             .run()?,
         @"
-    🌈 zizmor v@@VERSION@@
+     INFO zizmor: 🌈 zizmor v@@VERSION@@
     fatal: no audit was performed
     error: configuration error in @@CONFIG@@
       |
@@ -604,7 +572,7 @@ fn test_invalid_policy_syntax_6() -> Result<()> {
             .input(input_under_test("unpinned-uses/menagerie-of-uses.yml"))
             .run()?,
         @"
-    🌈 zizmor v@@VERSION@@
+     INFO zizmor: 🌈 zizmor v@@VERSION@@
     fatal: no audit was performed
     error: configuration error in @@CONFIG@@
 
@@ -641,7 +609,292 @@ fn test_reusable_workflow_unpinned() -> Result<()> {
        |
        = note: audit confidence → High
 
-    2 findings: 0 informational, 0 low, 0 medium, 2 high
+    help[self-repository]: use GitHub's dedicated self-repository syntax
+      --> @@INPUT@@:13:11
+       |
+    12 |   local-workflow:
+       |   -------------- this job
+    13 |     uses: ./.github/workflows/local.yml
+       |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ use '$/...' instead of './...'
+       |
+       = note: audit confidence → High
+       = note: this finding has an auto-fix
+
+    3 findings (1 unsafe fixes): 0 informational, 1 low, 0 medium, 2 high
+    "
+    );
+
+    Ok(())
+}
+
+#[cfg(feature = "gh-token-tests")]
+#[test]
+fn test_fix() -> anyhow::Result<()> {
+    use crate::common::{NetworkMode, WorkspaceBuilder};
+
+    let workflow_content = r#"
+name: Test
+on: push
+permissions: {}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout with ref-pin
+        uses: actions/checkout@v6.0.1
+        with:
+          persist-credentials: false
+"#;
+
+    let workspace = WorkspaceBuilder::new().is_git_repo(true).build()?;
+    workspace.add_file(".github/workflows/test.yml", &workflow_content);
+
+    insta::assert_snapshot!(
+        &workspace.diff(".github/workflows/test.yml", |workspace| {
+            zizmor()
+                .offline(NetworkMode::AssertOnline)
+                .output(crate::common::OutputMode::Both)
+                .args(["--fix=all"])
+                .input(workspace.path())
+                .run()
+        })?,
+        @"
+    @@ -7,6 +7,6 @@
+         runs-on: ubuntu-latest
+         steps:
+           - name: Checkout with ref-pin
+    -        uses: actions/checkout@v6.0.1
+    +        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+             with:
+               persist-credentials: false
+    "
+    );
+
+    Ok(())
+}
+
+#[cfg(feature = "gh-token-tests")]
+#[test]
+fn test_fix_crlf() -> anyhow::Result<()> {
+    use crate::common::{NetworkMode, WorkspaceBuilder};
+
+    let workflow_content = r#"
+name: Test
+on: push
+permissions: {}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout with ref-pin
+        uses: actions/checkout@v6.0.1
+        with:
+          persist-credentials: false
+"#
+    .replace("\n", "\r\n");
+
+    let workspace = WorkspaceBuilder::new().is_git_repo(true).build()?;
+    workspace.add_file(".github/workflows/test.yml", &workflow_content);
+
+    insta::assert_snapshot!(
+        &workspace.diff(".github/workflows/test.yml", |workspace| {
+            zizmor()
+                .offline(NetworkMode::AssertOnline)
+                .output(crate::common::OutputMode::Both)
+                .args(["--fix=all"])
+                .input(workspace.path())
+                .run()
+        })?,
+        @"
+    @@ -7,6 +7,6 @@
+         runs-on: ubuntu-latest
+         steps:
+           - name: Checkout with ref-pin
+    -        uses: actions/checkout@v6.0.1
+    +        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+             with:
+               persist-credentials: false
+    "
+    );
+
+    Ok(())
+}
+
+#[cfg(feature = "gh-token-tests")]
+#[test]
+fn test_fix_overwrites_comment() -> anyhow::Result<()> {
+    use crate::common::{NetworkMode, WorkspaceBuilder};
+
+    let workflow_content = r#"
+name: Test
+on: push
+permissions: {}
+jobs:
+    test:
+        runs-on: ubuntu-latest
+        steps:
+        - name: Checkout with ref-pin
+          uses: actions/checkout@v6.0.1 # old comment
+          with:
+            persist-credentials: false
+"#;
+
+    let workspace = WorkspaceBuilder::new().is_git_repo(true).build()?;
+    workspace.add_file(".github/workflows/test.yml", &workflow_content);
+
+    insta::assert_snapshot!(
+        &workspace.diff(".github/workflows/test.yml", |workspace| {
+            zizmor()
+                .offline(NetworkMode::AssertOnline)
+                .output(crate::common::OutputMode::Both)
+                .args(["--fix=all"])
+                .input(workspace.path())
+                .run()
+        })?,
+        @"
+    @@ -7,6 +7,6 @@
+             runs-on: ubuntu-latest
+             steps:
+             - name: Checkout with ref-pin
+    -          uses: actions/checkout@v6.0.1 # old comment
+    +          uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+               with:
+                 persist-credentials: false
+    "
+    );
+
+    Ok(())
+}
+
+#[cfg(feature = "gh-token-tests")]
+#[test]
+fn test_fix_bizarre_formatting() -> anyhow::Result<()> {
+    use crate::common::{NetworkMode, WorkspaceBuilder};
+
+    let workflow_content = r#"
+name: Test
+on: push
+permissions: {}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      -
+        uses: actions/checkout@v6.0.1
+        with:
+          persist-credentials: false
+"#;
+
+    let workspace = WorkspaceBuilder::new().is_git_repo(true).build()?;
+    workspace.add_file(".github/workflows/test.yml", &workflow_content);
+
+    insta::assert_snapshot!(
+        &workspace.diff(".github/workflows/test.yml", |workspace| {
+            zizmor()
+                .offline(NetworkMode::AssertOnline)
+                .output(crate::common::OutputMode::Both)
+                .args(["--fix=all"])
+                .input(workspace.path())
+                .run()
+        })?,
+        @"
+    @@ -7,6 +7,6 @@
+         runs-on: ubuntu-latest
+         steps:
+           -
+    -        uses: actions/checkout@v6.0.1
+    +        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+             with:
+               persist-credentials: false
+    "
+    );
+
+    Ok(())
+}
+
+#[cfg(feature = "gh-token-tests")]
+#[test]
+fn test_fix_preserves_subpath() -> anyhow::Result<()> {
+    use crate::common::{NetworkMode, WorkspaceBuilder};
+
+    let workflow_content = r#"
+name: Test
+on: push
+permissions: {}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: bytecodealliance/actions/wasmtime/setup@v1.1.3
+"#;
+
+    let workspace = WorkspaceBuilder::new().is_git_repo(true).build()?;
+    workspace.add_file(".github/workflows/test.yml", &workflow_content);
+
+    insta::assert_snapshot!(
+        &workspace.diff(".github/workflows/test.yml", |workspace| {
+            zizmor()
+                .offline(NetworkMode::AssertOnline)
+                .output(crate::common::OutputMode::Both)
+                .args(["--fix=all"])
+                .input(workspace.path())
+                .run()
+        })?,
+        @"
+    @@ -6,4 +6,4 @@
+       test:
+         runs-on: ubuntu-latest
+         steps:
+    -      - uses: bytecodealliance/actions/wasmtime/setup@v1.1.3
+    +      - uses: bytecodealliance/actions/wasmtime/setup@9152e710e9f7182e4c29ad218e4f335a7b203613 # v1.1.3
+    "
+    );
+
+    Ok(())
+}
+
+/// Tests that we expand a major version ref like `@v1` to the full version `v1.2.0`
+/// in the fix's inserted comment.
+#[cfg(feature = "gh-token-tests")]
+#[test]
+fn test_fix_major_version_pins_to_full_version() -> anyhow::Result<()> {
+    use crate::common::{NetworkMode, WorkspaceBuilder};
+
+    let workflow_content = r#"
+name: Test
+on: push
+permissions: {}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout with major-only ref
+        uses: actions/checkout@v1
+        with:
+          persist-credentials: false
+"#;
+
+    let workspace = WorkspaceBuilder::new().is_git_repo(true).build()?;
+    workspace.add_file(".github/workflows/test.yml", &workflow_content);
+
+    insta::assert_snapshot!(
+        &workspace.diff(".github/workflows/test.yml", |workspace| {
+            zizmor()
+                .offline(NetworkMode::AssertOnline)
+                .output(crate::common::OutputMode::Both)
+                .args(["--fix=all"])
+                .input(workspace.path())
+                .run()
+        })?,
+        @"
+    @@ -7,6 +7,6 @@
+         runs-on: ubuntu-latest
+         steps:
+           - name: Checkout with major-only ref
+    -        uses: actions/checkout@v1
+    +        uses: actions/checkout@50fbc622fc4ef5163becd7fab6573eac35f8462e # v1.2.0
+             with:
+               persist-credentials: false
     "
     );
 

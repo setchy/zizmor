@@ -1,6 +1,6 @@
 //! zizmor's language server.
 
-use std::str::FromStr;
+use std::str::FromStr as _;
 use tokio::sync::RwLock;
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -32,10 +32,18 @@ struct LspDocumentCommon {
     version: Option<i32>,
 }
 
+#[derive(Debug, Clone, Copy)]
+/// Configuration options for the LSP
+pub(crate) struct LspOptions {
+    /// The audit persona to use for the lsp
+    pub(crate) persona: Persona,
+}
+
 #[derive(Debug)]
 struct Backend {
     audit_registry: AuditRegistry,
     client: Client,
+    options: LspOptions,
     /// Currently opened workspace directories.
     /// These directories are used to discover configuration files that
     /// apply to audits.
@@ -257,17 +265,17 @@ impl Backend {
         let input = if matches!(path.file_name(), Some("action.yml" | "action.yaml")) {
             AuditInput::from(Action::from_string(
                 params.text,
-                InputKey::local("lsp".into(), path, None),
+                InputKey::local("lsp".into(), path, None, None),
             )?)
-        } else if matches!(path.file_name(), Some("dependabot.yml")) {
+        } else if matches!(path.file_name(), Some("dependabot.yml" | "dependabot.yaml")) {
             AuditInput::from(Dependabot::from_string(
                 params.text,
-                InputKey::local("lsp".into(), path, None),
+                InputKey::local("lsp".into(), path, None, None),
             )?)
         } else if matches!(path.extension(), Some("yml" | "yaml")) {
             AuditInput::from(Workflow::from_string(
                 params.text,
-                InputKey::local("lsp".into(), path, None),
+                InputKey::local("lsp".into(), path, None, None),
             )?)
         } else {
             anyhow::bail!("asked to audit unexpected file: {path}");
@@ -283,7 +291,7 @@ impl Backend {
             let workspace_dirs = self.workspace_dirs.read().await;
 
             for dir in workspace_dirs.as_slice() {
-                match Config::discover_local(dir.as_path()).await {
+                match Config::discover_local(dir.as_path(), Some(dir.as_path())).await {
                     Ok(Some(cfg)) => {
                         config = cfg;
                         break;
@@ -306,12 +314,16 @@ impl Backend {
             config
         };
 
-        let mut group = InputGroup::new(config);
+        // Note: we don't bother discovering the root directory
+        // for LSP inputs, since LSP diagnostics are always tied
+        // to a specific file, identified by an opaque URI.
+        let mut group = InputGroup::new(config, None);
         group.register_input(input)?;
         let mut input_registry = InputRegistry::new();
         input_registry.groups.insert("lsp".into(), group);
 
-        let mut registry = FindingRegistry::new(&input_registry, None, None, Persona::Regular);
+        let mut registry =
+            FindingRegistry::new(&input_registry, None, None, self.options.persona, false);
 
         for (input_key, input) in input_registry.iter_inputs() {
             for (ident, audit) in self.audit_registry.iter_audits() {
@@ -370,10 +382,10 @@ impl From<Severity> for ls_types::DiagnosticSeverity {
     fn from(value: Severity) -> Self {
         // TODO: Does this mapping make sense?
         match value {
-            Severity::Informational => ls_types::DiagnosticSeverity::INFORMATION,
-            Severity::Low => ls_types::DiagnosticSeverity::WARNING,
-            Severity::Medium => ls_types::DiagnosticSeverity::WARNING,
-            Severity::High => ls_types::DiagnosticSeverity::ERROR,
+            Severity::Informational => Self::INFORMATION,
+            Severity::Low => Self::WARNING,
+            Severity::Medium => Self::WARNING,
+            Severity::High => Self::ERROR,
         }
     }
 }
@@ -387,7 +399,7 @@ impl From<Point> for ls_types::Position {
     }
 }
 
-pub(crate) async fn run() -> Result<(), Error> {
+pub(crate) async fn run(options: LspOptions) -> Result<(), Error> {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
@@ -397,6 +409,7 @@ pub(crate) async fn run() -> Result<(), Error> {
     let (service, socket) = LspService::new(|client| Backend {
         audit_registry: audits,
         client,
+        options,
         workspace_dirs: RwLock::new(vec![]),
     });
 

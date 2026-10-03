@@ -1,8 +1,8 @@
 ---
 source: crates/zizmor/tests/integration/e2e/crater.rs
-expression: "zizmor().offline(false).output(OutputMode::Both).args([\"--persona=pedantic\"]).input(\"curl/curl@6c8956c1cbf5cffcd2fd4571cf277e2eec280578\").run()?"
+expression: "zizmor().offline(NetworkMode::AssertOnline).output(OutputMode::Both).args([\"--persona=pedantic\"]).input(\"curl/curl@6c8956c1cbf5cffcd2fd4571cf277e2eec280578\").run()?"
 ---
-🌈 zizmor v@@VERSION@@
+ INFO zizmor: 🌈 zizmor v@@VERSION@@
  INFO collect_inputs: zizmor::registry::input: collected 17 inputs from curl/curl
  INFO audit: zizmor: 🌈 completed .github/dependabot.yml
  INFO audit: zizmor: 🌈 completed .github/workflows/appveyor-status.yml
@@ -21,15 +21,65 @@ expression: "zizmor().offline(false).output(OutputMode::Both).args([\"--persona=
  INFO audit: zizmor: 🌈 completed .github/workflows/macos.yml
  INFO audit: zizmor: 🌈 completed .github/workflows/non-native.yml
  INFO audit: zizmor: 🌈 completed .github/workflows/windows.yml
-warning[ref-version-mismatch]: action's hash pin does not match version comment
+error[unpinned-images]: unpinned image references
+  --> .github/workflows/linux-old.yml:58:5
+   |
+58 |     container: 'debian:stretch'
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ container image is not pinned to a SHA256 hash
+   |
+   = note: audit confidence → High
+
+error[unpinned-images]: unpinned image references
+   --> .github/workflows/linux.yml:64:5
+    |
+ 64 |     container: ${{ matrix.build.container }}
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ container image is not pinned to a SHA256 hash
+...
+ 73 |       matrix:
+    |       ------ this matrix
+...
+390 |             container: 'andy5995/slackware-build-essential:15.0'
+    |             ---------------------------------------------------- this expansion of matrix.build.container
+    |
+    = note: audit confidence → High
+
+error[unpinned-images]: unpinned image references
+   --> .github/workflows/linux.yml:64:5
+    |
+ 64 |     container: ${{ matrix.build.container }}
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ container image is not pinned to a SHA256 hash
+...
+ 73 |       matrix:
+    |       ------ this matrix
+...
+394 |             container: 'alpine:3.20'
+    |             ------------------------ this expansion of matrix.build.container
+    |
+    = note: audit confidence → High
+
+error[unpinned-images]: unpinned image references
+   --> .github/workflows/linux.yml:64:5
+    |
+ 64 |     container: ${{ matrix.build.container }}
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ container image is not pinned to a SHA256 hash
+...
+ 73 |       matrix:
+    |       ------ this matrix
+...
+398 |             container: 'alpine:3.20'
+    |             ------------------------ this expansion of matrix.build.container
+    |
+    = note: audit confidence → High
+
+warning[ref-version-mismatch]: action's hash pin has mismatched or missing version comment
   --> .github/workflows/windows.yml:57:87
    |
 57 |       - uses: cygwin/cygwin-install-action@f2009323764960f80959895c7bc3bb30210afe4d # v6
-   |         ---------------------------------------------------------------------------   ^^ points to commit 711d29f3da23
-   |         |
-   |         is pointed to by tag v6.0
+   |               ---------------------------------------------------------------------   ^^ tag points to commit 3f0a3f9f988f
+   |               |
+   |               is pointed to by tag v6.0.0
    |
    = note: audit confidence → High
    = note: this finding has an auto-fix
 
-47 findings (2 ignored, 44 suppressed): 0 informational, 0 low, 1 medium, 0 high
+50 findings (1 ignored, 44 suppressed): 0 informational, 0 low, 1 medium, 4 high

@@ -1,8 +1,8 @@
 ---
 source: crates/zizmor/tests/integration/e2e.rs
-expression: "zizmor().offline(false).output(OutputMode::Both).args([\"--no-online-audits\"]).input(\"woodruffw/gha-hazmat@83e7e24df76fe8b5c0a1748b6fb24107a0e4fa61\").run()?"
+expression: "zizmor().offline(NetworkMode::AssertOnline).output(OutputMode::Both).args([\"--no-online-audits\"]).input(\"woodruffw/gha-hazmat@83e7e24df76fe8b5c0a1748b6fb24107a0e4fa61\").run()?"
 ---
-🌈 zizmor v@@VERSION@@
+ INFO zizmor: 🌈 zizmor v@@VERSION@@
  INFO collect_inputs: zizmor::registry::input: collected 22 inputs from woodruffw/gha-hazmat
  INFO audit: zizmor: 🌈 completed .github/workflows/artipacked.yml
  INFO audit: zizmor: 🌈 completed .github/workflows/bot-conditions.yml
@@ -17,10 +17,6 @@ expression: "zizmor().offline(false).output(OutputMode::Both).args([\"--no-onlin
  INFO audit: zizmor: 🌈 completed .github/workflows/pull-request-target.yml
  INFO audit: zizmor: 🌈 completed .github/workflows/pypi-manual-credential.yml
  INFO audit: zizmor: 🌈 completed .github/workflows/ref-confusion.yml
- WARN audit:audit{input=Workflow(https://github.com/woodruffw/gha-hazmat/blob/83e7e24df76fe8b5c0a1748b6fb24107a0e4fa61/.github/workflows/secrets-inherit.yml)}: zizmor::audit::unpinned_uses: failed to look up commit for octo-org/example-repo/.github/workflows/called-workflow.yml@main: couldn't list branches for octo-org/example-repo
- WARN audit:audit{input=Workflow(https://github.com/woodruffw/gha-hazmat/blob/83e7e24df76fe8b5c0a1748b6fb24107a0e4fa61/.github/workflows/secrets-inherit.yml)}: zizmor::audit::unpinned_uses: failed to look up commit for octo-org/example-repo/.github/workflows/called-workflow.yml@main: couldn't list branches for octo-org/example-repo
- WARN audit:audit{input=Workflow(https://github.com/woodruffw/gha-hazmat/blob/83e7e24df76fe8b5c0a1748b6fb24107a0e4fa61/.github/workflows/secrets-inherit.yml)}: zizmor::audit::unpinned_uses: failed to look up commit for octo-org/example-repo/.github/workflows/called-workflow.yml@main: couldn't list branches for octo-org/example-repo
- WARN audit:audit{input=Workflow(https://github.com/woodruffw/gha-hazmat/blob/83e7e24df76fe8b5c0a1748b6fb24107a0e4fa61/.github/workflows/secrets-inherit.yml)}: zizmor::audit::unpinned_uses: failed to look up commit for octo-org/example-repo/.github/workflows/called-workflow.yml@main: couldn't list branches for octo-org/example-repo
  INFO audit: zizmor: 🌈 completed .github/workflows/secrets-inherit.yml
  INFO audit: zizmor: 🌈 completed .github/workflows/self-hosted.yml
  INFO audit: zizmor: 🌈 completed .github/workflows/template-injection.yml
@@ -320,16 +316,14 @@ info[use-trusted-publishing]: prefer trusted publishing for authentication
 error[cache-poisoning]: runtime artifacts potentially vulnerable to a cache poisoning attack
   --> .github/workflows/cache-poisoning.yml:35:9
    |
-22 |   on: release
-   |   ----------- generally used when publishing artifacts generated at runtime
+22 | on: release
+   | ----------- generally used when publishing artifacts generated at runtime
 ...
-35 |           uses: actions/setup-java@8df1039502a15bceb9433410b1a100fbe190c53b
-   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this step
-36 | /         with:
-37 | |           distribution: "zulu"
-38 | |           cache: "gradle"
-39 | |           java-version: "17"
-   | |____________________________- enables caching explicitly here
+35 |         uses: actions/setup-java@8df1039502a15bceb9433410b1a100fbe190c53b
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this step
+...
+38 |           cache: "gradle"
+   |           --------------- enables caching explicitly here
    |
    = note: audit confidence → Low
 
@@ -340,7 +334,7 @@ error[cache-poisoning]: runtime artifacts potentially vulnerable to a cache pois
    | ----------- generally used when publishing artifacts generated at runtime
 ...
 55 |         uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab
-   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ enables caching by default
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ omitting `lookup-only` enables caching
    |
    = note: audit confidence → Low
    = note: this finding has an auto-fix
@@ -376,12 +370,10 @@ error[excessive-permissions]: overly broad permissions
    = note: audit confidence → High
 
 error[dangerous-triggers]: use of fundamentally insecure workflow trigger
-  --> .github/workflows/github-env.yml:19:1
+  --> .github/workflows/github-env.yml:21:3
    |
-19 | / on:
-20 | |   # NOT OK: pull_request_target enables this attack
-21 | |   pull_request_target:
-   | |______________________^ pull_request_target is almost always used insecurely
+21 |   pull_request_target:
+   |   ^^^^^^^^^^^^^^^^^^^ pull_request_target is almost always used insecurely
    |
    = note: audit confidence → Medium
 
@@ -604,12 +596,10 @@ warning[excessive-permissions]: overly broad permissions
    = note: audit confidence → Medium
 
 error[dangerous-triggers]: use of fundamentally insecure workflow trigger
-  --> .github/workflows/pull-request-target.yml:20:1
+  --> .github/workflows/pull-request-target.yml:22:3
    |
-20 | / on:
-21 | |   # NOT OK: pull_request_target should almost never be used
-22 | |   pull_request_target:
-   | |______________________^ pull_request_target is almost always used insecurely
+22 |   pull_request_target:
+   |   ^^^^^^^^^^^^^^^^^^^ pull_request_target is almost always used insecurely
    |
    = note: audit confidence → Medium
 
@@ -693,7 +683,6 @@ error[unpinned-uses]: unpinned action reference
    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ action is not pinned to a hash (required by blanket policy)
    |
    = note: audit confidence → High
-   = note: this finding has an auto-fix
 
 error[unpinned-uses]: unpinned action reference
   --> .github/workflows/pypi-manual-credential.yml:27:15
@@ -702,7 +691,6 @@ error[unpinned-uses]: unpinned action reference
    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ action is not pinned to a hash (required by blanket policy)
    |
    = note: audit confidence → High
-   = note: this finding has an auto-fix
 
 error[unpinned-uses]: unpinned action reference
   --> .github/workflows/pypi-manual-credential.yml:33:15
@@ -711,7 +699,6 @@ error[unpinned-uses]: unpinned action reference
    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ action is not pinned to a hash (required by blanket policy)
    |
    = note: audit confidence → High
-   = note: this finding has an auto-fix
 
 error[unpinned-uses]: unpinned action reference
   --> .github/workflows/pypi-manual-credential.yml:39:15
@@ -720,7 +707,6 @@ error[unpinned-uses]: unpinned action reference
    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ action is not pinned to a hash (required by blanket policy)
    |
    = note: audit confidence → High
-   = note: this finding has an auto-fix
 
 error[unpinned-uses]: unpinned action reference
   --> .github/workflows/pypi-manual-credential.yml:45:15
@@ -729,7 +715,6 @@ error[unpinned-uses]: unpinned action reference
    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ action is not pinned to a hash (required by blanket policy)
    |
    = note: audit confidence → High
-   = note: this finding has an auto-fix
 
 error[unpinned-uses]: unpinned action reference
   --> .github/workflows/pypi-manual-credential.yml:51:15
@@ -738,7 +723,6 @@ error[unpinned-uses]: unpinned action reference
    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ action is not pinned to a hash (required by blanket policy)
    |
    = note: audit confidence → High
-   = note: this finding has an auto-fix
 
 error[unpinned-uses]: unpinned action reference
   --> .github/workflows/pypi-manual-credential.yml:58:15
@@ -747,7 +731,6 @@ error[unpinned-uses]: unpinned action reference
    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ action is not pinned to a hash (required by blanket policy)
    |
    = note: audit confidence → High
-   = note: this finding has an auto-fix
 
 error[unpinned-uses]: unpinned action reference
   --> .github/workflows/pypi-manual-credential.yml:66:15
@@ -756,7 +739,6 @@ error[unpinned-uses]: unpinned action reference
    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ action is not pinned to a hash (required by blanket policy)
    |
    = note: audit confidence → High
-   = note: this finding has an auto-fix
 
 error[unpinned-uses]: unpinned action reference
   --> .github/workflows/pypi-manual-credential.yml:73:15
@@ -765,7 +747,6 @@ error[unpinned-uses]: unpinned action reference
    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ action is not pinned to a hash (required by blanket policy)
    |
    = note: audit confidence → High
-   = note: this finding has an auto-fix
 
 error[unpinned-uses]: unpinned action reference
   --> .github/workflows/pypi-manual-credential.yml:81:15
@@ -774,7 +755,6 @@ error[unpinned-uses]: unpinned action reference
    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ action is not pinned to a hash (required by blanket policy)
    |
    = note: audit confidence → High
-   = note: this finding has an auto-fix
 
 error[unpinned-uses]: unpinned action reference
   --> .github/workflows/ref-confusion.yml:26:15
@@ -783,7 +763,6 @@ error[unpinned-uses]: unpinned action reference
    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ action is not pinned to a hash (required by blanket policy)
    |
    = note: audit confidence → High
-   = note: this finding has an auto-fix
 
 warning[excessive-permissions]: overly broad permissions
   --> .github/workflows/secrets-inherit.yml:12:1
@@ -995,7 +974,7 @@ error[unpinned-images]: unpinned image references
   --> .github/workflows/unpinned-images.yml:38:7
    |
 38 |       image: fake.example.com/example:latest
-   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ container image is pinned to latest
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ container image uses the floating 'latest' tag
    |
    = note: audit confidence → High
 
@@ -1003,7 +982,7 @@ error[unpinned-images]: unpinned image references
   --> .github/workflows/unpinned-images.yml:46:9
    |
 46 |         image: fake.example.com/redis:latest
-   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ container image is pinned to latest
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ container image uses the floating 'latest' tag
    |
    = note: audit confidence → High
 
@@ -1024,19 +1003,19 @@ warning[excessive-permissions]: overly broad permissions
    |
    = note: audit confidence → Medium
 
-warning[unpinned-uses]: unpinned action reference
+error[unpinned-images]: unpinned image references
   --> .github/workflows/unpinned.yml:20:24
    |
 20 |       - uses: docker://ubuntu
-   |                        ^^^^^^ image is not pinned to a tag, branch, or hash ref
+   |                        ^^^^^^ container image is unpinned
    |
    = note: audit confidence → High
 
-warning[unpinned-uses]: unpinned action reference
+error[unpinned-images]: unpinned image references
   --> .github/workflows/unpinned.yml:26:24
    |
 26 |       - uses: docker://ghcr.io/pypa/gh-action-pypi-publish
-   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ image is not pinned to a tag, branch, or hash ref
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ container image is unpinned
    |
    = note: audit confidence → High
 
@@ -1114,14 +1093,11 @@ warning[excessive-permissions]: overly broad permissions
    = note: audit confidence → Medium
 
 error[dangerous-triggers]: use of fundamentally insecure workflow trigger
-  --> .github/workflows/workflow-run.yml:17:1
+  --> .github/workflows/workflow-run.yml:19:3
    |
-17 | / on:
-18 | |   # NOT OK: allows trivial third-party access to the upstream's context
-19 | |   workflow_run:
-20 | |     workflows: ["CI"]
-   | |_____________________^ workflow_run is almost always used insecurely
+19 |   workflow_run:
+   |   ^^^^^^^^^^^^ workflow_run is almost always used insecurely
    |
    = note: audit confidence → Medium
 
-202 findings (103 suppressed): 7 informational, 0 low, 29 medium, 63 high
+202 findings (103 suppressed): 7 informational, 0 low, 27 medium, 65 high

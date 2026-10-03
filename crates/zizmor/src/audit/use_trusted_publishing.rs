@@ -6,13 +6,12 @@ use tree_sitter::StreamingIterator as _;
 
 use super::{Audit, AuditLoadError, audit_meta};
 use crate::audit::AuditError;
-use crate::finding::location::Locatable;
+use crate::finding::location::Locatable as _;
 use crate::{
     finding::{Confidence, Finding, Severity},
     models::{
         StepBodyCommon, StepCommon,
         coordinate::{ActionCoordinate, ControlExpr, ControlFieldType, Toggle},
-        workflow::JobCommon as _,
     },
     state::AuditState,
     utils,
@@ -39,7 +38,7 @@ static KNOWN_TRUSTED_PUBLISHING_ACTIONS: LazyLock<Vec<(ActionCoordinate, &[&str]
                 ActionCoordinate::Configurable {
                     uses_pattern: "pypa/gh-action-pypi-publish".parse().unwrap(),
                     control: ControlExpr::all([
-                        ControlExpr::single(
+                        ControlExpr::field(
                             Toggle::OptIn,
                             "password",
                             ControlFieldType::FreeString,
@@ -51,13 +50,13 @@ static KNOWN_TRUSTED_PUBLISHING_ACTIONS: LazyLock<Vec<(ActionCoordinate, &[&str]
                         // If we used `any` we'd end up accidentally satisfying
                         // when the user only sets one of the control fields.
                         ControlExpr::all([
-                            ControlExpr::single(
+                            ControlExpr::field(
                                 Toggle::OptIn,
                                 "repository-url",
                                 ControlFieldType::Exact(KNOWN_PYTHON_TP_INDICES),
                                 true,
                             ),
-                            ControlExpr::single(
+                            ControlExpr::field(
                                 Toggle::OptIn,
                                 "repository_url",
                                 ControlFieldType::Exact(KNOWN_PYTHON_TP_INDICES),
@@ -85,7 +84,7 @@ static KNOWN_TRUSTED_PUBLISHING_ACTIONS: LazyLock<Vec<(ActionCoordinate, &[&str]
             (
                 ActionCoordinate::Configurable {
                     uses_pattern: "rubygems/release-gem".parse().unwrap(),
-                    control: ControlExpr::not(ControlExpr::single(
+                    control: ControlExpr::not(ControlExpr::field(
                         Toggle::OptIn,
                         "setup-trusted-publisher",
                         ControlFieldType::Boolean,
@@ -98,13 +97,13 @@ static KNOWN_TRUSTED_PUBLISHING_ACTIONS: LazyLock<Vec<(ActionCoordinate, &[&str]
                 ActionCoordinate::Configurable {
                     uses_pattern: "rubygems/configure-rubygems-credentials".parse().unwrap(),
                     control: ControlExpr::all([
-                        ControlExpr::single(
+                        ControlExpr::field(
                             Toggle::OptIn,
                             "api-token",
                             ControlFieldType::FreeString,
                             false,
                         ),
-                        ControlExpr::single(
+                        ControlExpr::field(
                             Toggle::OptIn,
                             "gem-server",
                             ControlFieldType::Exact(KNOWN_RUBY_TP_INDICES),
@@ -120,14 +119,14 @@ static KNOWN_TRUSTED_PUBLISHING_ACTIONS: LazyLock<Vec<(ActionCoordinate, &[&str]
                 ActionCoordinate::Configurable {
                     uses_pattern: "actions/setup-node".parse().unwrap(),
                     control: ControlExpr::all([
-                        ControlExpr::single(
+                        ControlExpr::field(
                             Toggle::OptIn,
                             "registry-url",
                             ControlFieldType::Exact(KNOWN_NPMJS_TP_INDICES),
                             true,
                         ),
                         // Detect when always-auth is enabled (indicating manual token usage)
-                        ControlExpr::single(
+                        ControlExpr::field(
                             Toggle::OptIn,
                             "always-auth",
                             ControlFieldType::Boolean,
@@ -162,7 +161,7 @@ impl UseTrustedPublishing {
         cursor: &'a mut tree_sitter::QueryCursor,
         tree: &'a tree_sitter::Tree,
         source: &'a str,
-    ) -> tree_sitter::QueryMatches<'a, 'a, &'a [u8], &'a [u8]> {
+    ) -> tree_sitter::QueryMatches<'a, 'a, 'static, &'a [u8], &'a [u8]> {
         cursor.matches(query, tree.root_node(), source.as_bytes())
     }
 
@@ -380,7 +379,7 @@ impl UseTrustedPublishing {
         matches.for_each(|mat| {
             let cmd = {
                 let cap = mat
-                    .captures
+                    .captures()
                     .iter()
                     .find(|cap| cap.index == cmd)
                     .expect("internal error: expected capture for cmd");
@@ -390,7 +389,7 @@ impl UseTrustedPublishing {
             };
 
             let args = mat
-                .captures
+                .captures()
                 .iter()
                 .filter(|cap| cap.index == args)
                 .map(|cap| {
@@ -401,7 +400,7 @@ impl UseTrustedPublishing {
 
             if Self::is_publish_command(cmd, args) {
                 let span = mat
-                    .captures
+                    .captures()
                     .iter()
                     .find(|cap| cap.index == query.span_idx)
                     .expect("internal error: expected capture for span");
@@ -448,15 +447,14 @@ impl Audit for UseTrustedPublishing {
         // a strict filter. This ended up being overly imprecise, since a lot
         // of publishing commands use trusted publishing implicitly if
         // the environment supports it. We reverted this with #1191.
-        if let StepBodyCommon::Run { run, .. } = step.body()
+        if let Some(StepBodyCommon::Run { run, .. }) = step.body()
             && !step.parent.has_id_token()
         {
             let shell = step.shell().map(|s| s.0).unwrap_or_else(|| {
                 tracing::debug!(
-                    "use-trusted-publishing: couldn't determine shell type for {workflow}:{job} step {stepno}",
+                    "use-trusted-publishing: couldn't determine shell type for {workflow} step {loc:#?}",
                     workflow = step.workflow().key.filename(),
-                    job = step.parent.id(),
-                    stepno = step.index
+                    loc = step.location(),
                 );
 
                 "bash"
@@ -564,7 +562,7 @@ mod tests {
             (&["dotnet", "build"][..], false),
         ] {
             let cmd = args[0];
-            let args_iter = args[1..].iter().map(|s| *s);
+            let args_iter = args[1..].iter().copied();
             assert_eq!(
                 super::UseTrustedPublishing::is_publish_command(cmd, args_iter),
                 *is_publish_command,

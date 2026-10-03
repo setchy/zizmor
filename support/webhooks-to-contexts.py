@@ -1,4 +1,4 @@
-#!/usr/bin/env -S uv run --script
+#!/usr/bin/env -S uv run --script --locked
 # /// script
 # requires-python = ">=3.13"
 # dependencies = [
@@ -151,8 +151,6 @@ _WORKFLOW_TRIGGERS_TO_EVENTS: dict[str, list[str]] = {
         "auto_merge_enabled",
         "auto_merge_disabled",
     ],
-    # Unused.
-    # "pull_request_comment": []
     "pull_request_review": [
         "submitted",
         "edited",
@@ -194,12 +192,6 @@ _WORKFLOW_TRIGGERS_TO_EVENTS: dict[str, list[str]] = {
         "requested",
     ],
 }
-
-
-def log(msg: str) -> None:
-    print(f"[+] {msg}", file=sys.stderr)
-
-
 # Represents the capability of an expanded expression from a
 # webhook's payload.
 # For example, `github.pull_request.title` would be `arbitrary` because
@@ -208,6 +200,10 @@ def log(msg: str) -> None:
 # can't influence its value in a structured manner. `structured` is a middle
 # ground where the attacker can influence the value, but only in a limited way.
 Capability = Literal["arbitrary"] | Literal["structured"] | Literal["fixed"]
+
+
+def log(msg: str) -> None:
+    print(f"[+] {msg}", file=sys.stderr)
 
 
 def walk_schema(
@@ -284,8 +280,15 @@ def walk_schema(
             match format:
                 case "date-time":
                     yield (top, "fixed")
-                case "uri" | "uri-template" | "email":
+                case "uri-template" | "email":
                     yield (top, "structured")
+                case "uri":
+                    # NOTE(ww): In principle these are 'structured' because they have a specific
+                    # format, but in practice GitHub's backend doesn't consistently enforce
+                    # or impose that structure. For example `github.event.deployment_status.deployment_url`
+                    # should be a well-formed URL, but is actually fully attacker-controllable.
+                    # See: https://labs.boostsecurity.io/articles/deployment_poisoning/
+                    yield (top, "arbitrary")
                 case None:
                     if "enum" in schema:
                         yield (top, "fixed")
@@ -371,6 +374,6 @@ if __name__ == "__main__":
         patterns_to_capabilities[context] = "fixed"
 
     with _OUT.open("w") as io:
-        writer = csv.writer(io)
+        writer = csv.writer(io, lineterminator="\n")
         for pattern, cap in sorted(patterns_to_capabilities.items(), key=itemgetter(0)):
             writer.writerow([pattern, cap])

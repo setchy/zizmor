@@ -43,6 +43,11 @@ pub struct MultiEcosystemGroup {
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "kebab-case", tag = "type")]
 pub enum Registry {
+    CargoRegistry {
+        url: String,
+        registry: String,
+        token: String,
+    },
     ComposerRepository {
         url: String,
         username: Option<String>,
@@ -56,6 +61,11 @@ pub enum Registry {
         replaces_base: bool,
     },
     Git {
+        url: String,
+        username: Option<String>,
+        password: Option<String>,
+    },
+    GoproxyServer {
         url: String,
         username: Option<String>,
         password: Option<String>,
@@ -361,6 +371,8 @@ pub enum PackageEcosystem {
     Composer,
     /// `conda`
     Conda,
+    /// `deno`
+    Deno,
     /// `devcontainers`
     Devcontainers,
     /// `docker`
@@ -387,6 +399,8 @@ pub enum PackageEcosystem {
     Maven,
     /// `mix`
     Mix,
+    /// `nix`
+    Nix,
     /// `npm`
     Npm,
     /// `nuget`
@@ -401,6 +415,8 @@ pub enum PackageEcosystem {
     Pub,
     /// `rust-toolchain`
     RustToolchain,
+    /// `sbt`
+    Sbt,
     /// `swift`
     Swift,
     /// `terraform`

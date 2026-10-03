@@ -17,8 +17,7 @@ expression: output
         "symbolic": {
           "key": {
             "Local": {
-              "prefix": null,
-              "given_path": "@@INPUT@@"
+              "verbatim_path": "@@INPUT@@"
             }
           },
           "annotation": "this step",
@@ -66,8 +65,7 @@ expression: output
         "symbolic": {
           "key": {
             "Local": {
-              "prefix": null,
-              "given_path": "@@INPUT@@"
+              "verbatim_path": "@@INPUT@@"
             }
           },
           "annotation": "may expand into attacker-controllable code",
@@ -126,8 +124,7 @@ expression: output
         "symbolic": {
           "key": {
             "Local": {
-              "prefix": null,
-              "given_path": "@@INPUT@@"
+              "verbatim_path": "@@INPUT@@"
             }
           },
           "annotation": "action accepts arbitrary code",
@@ -178,8 +175,7 @@ expression: output
         "symbolic": {
           "key": {
             "Local": {
-              "prefix": null,
-              "given_path": "@@INPUT@@"
+              "verbatim_path": "@@INPUT@@"
             }
           },
           "annotation": "via this input",
@@ -228,7 +224,8 @@ expression: output
         }
       }
     ],
-    "ignored": false
+    "ignored": false,
+    "fixes": []
   },
   {
     "ident": "unpinned-uses",
@@ -244,8 +241,53 @@ expression: output
         "symbolic": {
           "key": {
             "Local": {
-              "prefix": null,
-              "given_path": "@@INPUT@@"
+              "verbatim_path": "@@INPUT@@"
+            }
+          },
+          "annotation": "this step",
+          "route": {
+            "route": [
+              {
+                "Key": "jobs"
+              },
+              {
+                "Key": "unpinned-0"
+              },
+              {
+                "Key": "steps"
+              },
+              {
+                "Index": 0
+              }
+            ]
+          },
+          "feature_kind": "Normal",
+          "kind": "Hidden"
+        },
+        "concrete": {
+          "location": {
+            "start_point": {
+              "row": 15,
+              "column": 8
+            },
+            "end_point": {
+              "row": 18,
+              "column": 0
+            },
+            "offset_span": {
+              "start": 295,
+              "end": 372
+            }
+          },
+          "feature": "uses: actions/checkout@v3\n        with:\n          persist-credentials: false\n",
+          "comments": []
+        }
+      },
+      {
+        "symbolic": {
+          "key": {
+            "Local": {
+              "verbatim_path": "@@INPUT@@"
             }
           },
           "annotation": "action is not pinned to a hash (required by blanket policy)",
@@ -298,147 +340,8 @@ expression: output
         }
       }
     ],
-    "ignored": false
-  },
-  {
-    "ident": "unpinned-uses",
-    "desc": "unpinned action reference",
-    "url": "https://docs.zizmor.sh/audits/#unpinned-uses",
-    "determinations": {
-      "confidence": "High",
-      "severity": "Medium",
-      "persona": "Regular"
-    },
-    "locations": [
-      {
-        "symbolic": {
-          "key": {
-            "Local": {
-              "prefix": null,
-              "given_path": "@@INPUT@@"
-            }
-          },
-          "annotation": "image is not pinned to a tag, branch, or hash ref",
-          "route": {
-            "route": [
-              {
-                "Key": "jobs"
-              },
-              {
-                "Key": "unpinned-0"
-              },
-              {
-                "Key": "steps"
-              },
-              {
-                "Index": 1
-              },
-              {
-                "Key": "uses"
-              }
-            ]
-          },
-          "feature_kind": {
-            "Subfeature": {
-              "after": 0,
-              "fragment": {
-                "Raw": "ubuntu"
-              }
-            }
-          },
-          "kind": "Primary"
-        },
-        "concrete": {
-          "location": {
-            "start_point": {
-              "row": 20,
-              "column": 23
-            },
-            "end_point": {
-              "row": 20,
-              "column": 29
-            },
-            "offset_span": {
-              "start": 421,
-              "end": 427
-            }
-          },
-          "feature": "docker://ubuntu",
-          "comments": []
-        }
-      }
-    ],
-    "ignored": false
-  },
-  {
-    "ident": "unpinned-uses",
-    "desc": "unpinned action reference",
-    "url": "https://docs.zizmor.sh/audits/#unpinned-uses",
-    "determinations": {
-      "confidence": "High",
-      "severity": "Medium",
-      "persona": "Regular"
-    },
-    "locations": [
-      {
-        "symbolic": {
-          "key": {
-            "Local": {
-              "prefix": null,
-              "given_path": "@@INPUT@@"
-            }
-          },
-          "annotation": "image is not pinned to a tag, branch, or hash ref",
-          "route": {
-            "route": [
-              {
-                "Key": "jobs"
-              },
-              {
-                "Key": "unpinned-0"
-              },
-              {
-                "Key": "steps"
-              },
-              {
-                "Index": 2
-              },
-              {
-                "Key": "uses"
-              }
-            ]
-          },
-          "feature_kind": {
-            "Subfeature": {
-              "after": 0,
-              "fragment": {
-                "Raw": "ghcr.io/pypa/gh-action-pypi-publish"
-              }
-            }
-          },
-          "kind": "Primary"
-        },
-        "concrete": {
-          "location": {
-            "start_point": {
-              "row": 26,
-              "column": 23
-            },
-            "end_point": {
-              "row": 26,
-              "column": 58
-            },
-            "offset_span": {
-              "start": 546,
-              "end": 581
-            }
-          },
-          "feature": "docker://ghcr.io/pypa/gh-action-pypi-publish",
-          "comments": []
-        }
-      }
-    ],
-    "ignored": false
+    "ignored": false,
+    "fixes": []
   },
   {
     "ident": "unsound-contains",
@@ -454,8 +357,7 @@ expression: output
         "symbolic": {
           "key": {
             "Local": {
-              "prefix": null,
-              "given_path": "@@INPUT@@"
+              "verbatim_path": "@@INPUT@@"
             }
           },
           "annotation": "contains(..) condition can be bypassed if attacker can control 'github.ref'",
@@ -501,7 +403,8 @@ expression: output
         }
       }
     ],
-    "ignored": false
+    "ignored": false,
+    "fixes": []
   },
   {
     "ident": "unsound-contains",
@@ -517,8 +420,7 @@ expression: output
         "symbolic": {
           "key": {
             "Local": {
-              "prefix": null,
-              "given_path": "@@INPUT@@"
+              "verbatim_path": "@@INPUT@@"
             }
           },
           "annotation": "contains(..) condition can be bypassed if attacker can control 'env.GITHUB_REF_NAME'",
@@ -564,7 +466,8 @@ expression: output
         }
       }
     ],
-    "ignored": false
+    "ignored": false,
+    "fixes": []
   },
   {
     "ident": "unsound-contains",
@@ -580,8 +483,7 @@ expression: output
         "symbolic": {
           "key": {
             "Local": {
-              "prefix": null,
-              "given_path": "@@INPUT@@"
+              "verbatim_path": "@@INPUT@@"
             }
           },
           "annotation": "contains(..) condition can be bypassed if attacker can control 'github.ref_name'",
@@ -627,7 +529,8 @@ expression: output
         }
       }
     ],
-    "ignored": false
+    "ignored": false,
+    "fixes": []
   },
   {
     "ident": "unsound-contains",
@@ -643,8 +546,7 @@ expression: output
         "symbolic": {
           "key": {
             "Local": {
-              "prefix": null,
-              "given_path": "@@INPUT@@"
+              "verbatim_path": "@@INPUT@@"
             }
           },
           "annotation": "contains(..) condition can be bypassed if attacker can control 'github.actor'",
@@ -690,7 +592,8 @@ expression: output
         }
       }
     ],
-    "ignored": false
+    "ignored": false,
+    "fixes": []
   },
   {
     "ident": "unsound-contains",
@@ -706,8 +609,7 @@ expression: output
         "symbolic": {
           "key": {
             "Local": {
-              "prefix": null,
-              "given_path": "@@INPUT@@"
+              "verbatim_path": "@@INPUT@@"
             }
           },
           "annotation": "contains(..) condition can be bypassed if attacker can control 'runner.name'",
@@ -753,6 +655,7 @@ expression: output
         }
       }
     ],
-    "ignored": false
+    "ignored": false,
+    "fixes": []
   }
 ]

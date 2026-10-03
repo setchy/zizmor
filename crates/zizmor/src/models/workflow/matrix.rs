@@ -1,14 +1,13 @@
 //! Strategy matrix modeling and APIs.
 
-use github_actions_expressions::context::Context;
-use github_actions_models::{common::expr::LoE, workflow::job};
-use indexmap::IndexMap;
-
 use crate::{
     finding::location::{Locatable, SymbolicLocation},
     models::workflow::NormalJob,
     utils::extract_fenced_expressions,
 };
+use github_actions_expressions::context::Context;
+use github_actions_models::{common::expr::LoE, workflow::job};
+use indexmap::IndexMap;
 
 /// Represents a concrete expansion of a matrix.
 ///
@@ -61,15 +60,57 @@ impl<'doc> Expansion<'doc> {
     }
 }
 
-pub(crate) struct Expansions<'doc>(Vec<Expansion<'doc>>);
+/// The container for a matrix expansions
+#[derive(Clone, Debug)]
+pub(crate) struct Expansions<'doc> {
+    /// Consolidated expansions of dimensions and explicit rows,
+    /// evaluating inclusions and exclusions, if any
+    all_expansions: Vec<Expansion<'doc>>,
+
+    /// Whether the matrix itself is fully indirect
+    indirectly_expanded: Option<SymbolicLocation<'doc>>,
+
+    /// Whether some inclusions are defined by non-static expressions
+    indirect_inclusions: Option<SymbolicLocation<'doc>>,
+
+    /// Whether some exclusions are defined by non-static expressions
+    indirect_exclusions: Option<SymbolicLocation<'doc>>,
+}
 
 impl<'doc> Expansions<'doc> {
-    pub(crate) fn new(matrix: &Matrix<'doc>) -> Self {
-        Self::expand_values(matrix)
+    pub(crate) fn new(matrix: &LoE<job::Matrix>, parent: &NormalJob<'doc>) -> Self {
+        let matrix_location = parent
+            .location()
+            .with_keys(["strategy".into(), "matrix".into()])
+            .annotated("this matrix");
+        Self::expand_values(matrix, matrix_location)
     }
 
+    /// Exposes an iterator over the evaluated expansions
     pub(crate) fn iter(&self) -> impl Iterator<Item = &Expansion<'doc>> {
-        self.0.iter()
+        self.all_expansions.iter()
+    }
+
+    /// Exposes the `SymbolicLocation` if `matrix` is fully indirectly expanded
+    pub(crate) fn indirectly_expanded(&self) -> &Option<SymbolicLocation<'doc>> {
+        &self.indirectly_expanded
+    }
+
+    /// Exposes the `SymbolicLocation` if `matrix.include` holds any indirect values
+    pub(crate) fn indirect_inclusions(&self) -> &Option<SymbolicLocation<'doc>> {
+        &self.indirect_inclusions
+    }
+
+    /// Exposes the `SymbolicLocation` if `matrix.exclude` holds any indirect values
+    #[allow(dead_code)]
+    pub(crate) fn indirect_exclusions(&self) -> &Option<SymbolicLocation<'doc>> {
+        &self.indirect_exclusions
+    }
+
+    /// Whether there are any indirections after expanding the matrix.
+    /// Note that exclusions can't add values, hence they are not considered
+    pub(crate) fn has_indirect_expansions(&self) -> bool {
+        self.indirectly_expanded.is_some() || self.indirect_inclusions.is_some()
     }
 
     /// Expands the current Matrix into all possible values
@@ -78,17 +119,43 @@ impl<'doc> Expansions<'doc> {
     /// the second component is the string representation for the expanded value
     /// (e.g. ubuntu-latest)
     ///
-    fn expand_values(matrix: &Matrix<'doc>) -> Self {
-        match matrix.inner {
-            LoE::Expr(_) => Self(vec![]),
+    fn expand_values(matrix: &LoE<job::Matrix>, location: SymbolicLocation<'doc>) -> Self {
+        match matrix {
+            LoE::Expr(_) => Self {
+                all_expansions: vec![],
+                // We consider this scenario as an indirect expansion
+                indirectly_expanded: Some(location.clone()),
+                indirect_inclusions: None,
+                indirect_exclusions: None,
+            },
             LoE::Literal(inner) => {
                 let LoE::Literal(dimensions) = &inner.dimensions else {
-                    return Self(vec![]);
+                    return Self {
+                        all_expansions: vec![],
+                        // We also consider this scenario as an indirect expansion
+                        indirectly_expanded: Some(location.clone()),
+                        indirect_inclusions: None,
+                        indirect_exclusions: None,
+                    };
                 };
 
-                let mut expansions = Self::expand_dimensions(dimensions, matrix.location());
+                let mut expanded = Self::expand_dimensions(dimensions, location.clone());
 
-                // BUG: we should handle LoE::Expr as an indicator of an indirect matrix.
+                // Should be processed before includes, since that's what GitHub does.
+                if let LoE::Literal(excludes) = &inner.exclude {
+                    let to_exclude = excludes
+                        .iter()
+                        .flat_map(|exclude| {
+                            Self::expand_explicit_rows(
+                                exclude,
+                                location.with_keys(["exclude".into()]),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+
+                    expanded.retain(|expanded| !to_exclude.contains(expanded));
+                };
+
                 if let LoE::Literal(includes) = &inner.include {
                     let additional_expansions = includes
                         .iter()
@@ -96,42 +163,38 @@ impl<'doc> Expansions<'doc> {
                         .flat_map(|(idx, include)| {
                             Self::expand_explicit_rows(
                                 include,
-                                matrix.location().with_keys(["include".into(), idx.into()]),
+                                location.clone().with_keys(["include".into(), idx.into()]),
                             )
                         })
                         .collect::<Vec<_>>();
 
-                    expansions.extend(additional_expansions);
+                    expanded.extend(additional_expansions);
                 };
 
-                // BUG: excludes should be processed before includes, since that's what GitHub does.
-                // BUG: we should handle LoE::Expr as an indicator of an indirect matrix.
-                let LoE::Literal(excludes) = &inner.exclude else {
-                    return Self(expansions);
+                // Don't miss any indirections, handling inclusions and exclusions
+                // defined by expressions
+                let maybe_indirect_inclusions = match &inner.include {
+                    LoE::Expr(_) => Some(location.clone().with_keys(["include".into()])),
+                    _ => None,
                 };
 
-                let to_exclude = excludes
-                    .iter()
-                    .flat_map(|exclude| {
-                        Self::expand_explicit_rows(
-                            exclude,
-                            matrix.location().with_keys(["exclude".into()]),
-                        )
-                    })
-                    .collect::<Vec<_>>();
+                let maybe_indirect_exclusions = match &inner.exclude {
+                    LoE::Expr(_) => Some(location.clone().with_keys(["exclude".into()])),
+                    _ => None,
+                };
 
-                Self(
-                    expansions
-                        .into_iter()
-                        .filter(|expanded| !to_exclude.contains(expanded))
-                        .collect(),
-                )
+                Self {
+                    all_expansions: expanded,
+                    indirectly_expanded: None,
+                    indirect_inclusions: maybe_indirect_inclusions,
+                    indirect_exclusions: maybe_indirect_exclusions,
+                }
             }
         }
     }
 
     fn expand_explicit_rows(
-        include: &IndexMap<String, serde_yaml::Value>,
+        include: &IndexMap<String, yaml_serde::Value>,
         base: SymbolicLocation<'doc>,
     ) -> Vec<Expansion<'doc>> {
         let normalized = include
@@ -143,7 +206,7 @@ impl<'doc> Expansions<'doc> {
     }
 
     fn expand_dimensions(
-        dimensions: &IndexMap<String, LoE<Vec<serde_yaml::Value>>>,
+        dimensions: &IndexMap<String, LoE<Vec<yaml_serde::Value>>>,
         base: SymbolicLocation<'doc>,
     ) -> Vec<Expansion<'doc>> {
         let normalized = dimensions
@@ -224,7 +287,7 @@ impl<'doc> Expansions<'doc> {
 pub(crate) struct Matrix<'doc> {
     inner: &'doc LoE<job::Matrix>,
     parent: NormalJob<'doc>,
-    // expansions: Vec<Expansion<'doc>>,
+    expansions: Expansions<'doc>,
 }
 
 impl<'doc> Matrix<'doc> {
@@ -235,19 +298,20 @@ impl<'doc> Matrix<'doc> {
         Some(Self {
             inner: matrix,
             parent: parent.clone(),
-            // expansions: Matrix::expand_values(matrix),
+            expansions: Expansions::new(matrix, parent),
         })
     }
 
-    pub(crate) fn expansions(&self) -> Expansions<'doc> {
-        Expansions::new(self)
+    /// The expansions for this matrix
+    pub(crate) fn expansions(&self) -> &Expansions<'doc> {
+        &self.expansions
     }
 
     /// Checks whether some expanded path leads to an expression
     pub(crate) fn expands_to_static_values(&self, context: &Context) -> bool {
-        // If we have an indirect matrix, we can't determine whether it expands to
+        // If any part of the matrix is indirect, we can't determine whether it expands to
         // static values or not.
-        if matches!(self.inner, LoE::Expr(_)) {
+        if self.expansions().indirectly_expanded.is_some() {
             return false;
         }
 
@@ -284,7 +348,7 @@ mod tests {
 
     use crate::{
         models::{
-            AsDocument,
+            AsDocument as _,
             workflow::{NormalJob, Workflow, matrix::Matrix},
         },
         registry::input::InputKey,
@@ -317,7 +381,7 @@ jobs:
 
         let workflow = Workflow::from_string(
             workflow_yaml.into(),
-            InputKey::local("fakegroup".into(), "test.yml", None),
+            InputKey::local("fakegroup".into(), "test.yml", None, None),
         )
         .unwrap();
 
@@ -344,8 +408,9 @@ jobs:
                             group: Group(
                                 "fakegroup",
                             ),
-                            prefix: None,
-                            given_path: "test.yml",
+                            verbatim_path: "test.yml",
+                            native_path: "test.yml",
+                            best_identifier: "test.yml",
                         },
                     ),
                     annotation: "this expansion",
@@ -385,8 +450,9 @@ jobs:
                             group: Group(
                                 "fakegroup",
                             ),
-                            prefix: None,
-                            given_path: "test.yml",
+                            verbatim_path: "test.yml",
+                            native_path: "test.yml",
+                            best_identifier: "test.yml",
                         },
                     ),
                     annotation: "this expansion",
@@ -426,8 +492,9 @@ jobs:
                             group: Group(
                                 "fakegroup",
                             ),
-                            prefix: None,
-                            given_path: "test.yml",
+                            verbatim_path: "test.yml",
+                            native_path: "test.yml",
+                            best_identifier: "test.yml",
                         },
                     ),
                     annotation: "this expansion",
@@ -467,8 +534,9 @@ jobs:
                             group: Group(
                                 "fakegroup",
                             ),
-                            prefix: None,
-                            given_path: "test.yml",
+                            verbatim_path: "test.yml",
+                            native_path: "test.yml",
+                            best_identifier: "test.yml",
                         },
                     ),
                     annotation: "this expansion",
@@ -508,8 +576,9 @@ jobs:
                             group: Group(
                                 "fakegroup",
                             ),
-                            prefix: None,
-                            given_path: "test.yml",
+                            verbatim_path: "test.yml",
+                            native_path: "test.yml",
+                            best_identifier: "test.yml",
                         },
                     ),
                     annotation: "this expansion",
@@ -549,8 +618,9 @@ jobs:
                             group: Group(
                                 "fakegroup",
                             ),
-                            prefix: None,
-                            given_path: "test.yml",
+                            verbatim_path: "test.yml",
+                            native_path: "test.yml",
+                            best_identifier: "test.yml",
                         },
                     ),
                     annotation: "this expansion",
@@ -590,8 +660,9 @@ jobs:
                             group: Group(
                                 "fakegroup",
                             ),
-                            prefix: None,
-                            given_path: "test.yml",
+                            verbatim_path: "test.yml",
+                            native_path: "test.yml",
+                            best_identifier: "test.yml",
                         },
                     ),
                     annotation: "this expansion",
@@ -634,8 +705,9 @@ jobs:
                             group: Group(
                                 "fakegroup",
                             ),
-                            prefix: None,
-                            given_path: "test.yml",
+                            verbatim_path: "test.yml",
+                            native_path: "test.yml",
+                            best_identifier: "test.yml",
                         },
                     ),
                     annotation: "this expansion",
@@ -678,8 +750,9 @@ jobs:
                             group: Group(
                                 "fakegroup",
                             ),
-                            prefix: None,
-                            given_path: "test.yml",
+                            verbatim_path: "test.yml",
+                            native_path: "test.yml",
+                            best_identifier: "test.yml",
                         },
                     ),
                     annotation: "this expansion",
@@ -722,8 +795,9 @@ jobs:
                             group: Group(
                                 "fakegroup",
                             ),
-                            prefix: None,
-                            given_path: "test.yml",
+                            verbatim_path: "test.yml",
+                            native_path: "test.yml",
+                            best_identifier: "test.yml",
                         },
                     ),
                     annotation: "this expansion",
@@ -766,8 +840,9 @@ jobs:
                             group: Group(
                                 "fakegroup",
                             ),
-                            prefix: None,
-                            given_path: "test.yml",
+                            verbatim_path: "test.yml",
+                            native_path: "test.yml",
+                            best_identifier: "test.yml",
                         },
                     ),
                     annotation: "this expansion",
@@ -810,8 +885,9 @@ jobs:
                             group: Group(
                                 "fakegroup",
                             ),
-                            prefix: None,
-                            given_path: "test.yml",
+                            verbatim_path: "test.yml",
+                            native_path: "test.yml",
+                            best_identifier: "test.yml",
                         },
                     ),
                     annotation: "this expansion",
@@ -854,8 +930,9 @@ jobs:
                             group: Group(
                                 "fakegroup",
                             ),
-                            prefix: None,
-                            given_path: "test.yml",
+                            verbatim_path: "test.yml",
+                            native_path: "test.yml",
+                            best_identifier: "test.yml",
                         },
                     ),
                     annotation: "this expansion",
@@ -901,8 +978,9 @@ jobs:
                             group: Group(
                                 "fakegroup",
                             ),
-                            prefix: None,
-                            given_path: "test.yml",
+                            verbatim_path: "test.yml",
+                            native_path: "test.yml",
+                            best_identifier: "test.yml",
                         },
                     ),
                     annotation: "this expansion",
@@ -943,7 +1021,7 @@ jobs:
         "#);
 
         // Ensure that we can concretize every expansion's location without error.
-        for expansion in matrix.expansions().0 {
+        for expansion in matrix.expansions().all_expansions.clone() {
             expansion.location.concretize(workflow.as_document())?;
         }
 
@@ -974,7 +1052,7 @@ jobs:
 
         let workflow = Workflow::from_string(
             workflow_yaml.into(),
-            InputKey::local("fakegroup".into(), "test.yml", None),
+            InputKey::local("fakegroup".into(), "test.yml", None, None),
         )?;
 
         let job = {
@@ -1025,7 +1103,7 @@ jobs:
 
         let workflow = Workflow::from_string(
             workflow_yaml.into(),
-            InputKey::local("fakegroup".into(), "test.yml", None),
+            InputKey::local("fakegroup".into(), "test.yml", None, None),
         )?;
 
         let job = {
@@ -1039,9 +1117,60 @@ jobs:
         };
 
         let matrix = Matrix::new(&job).unwrap();
-        assert!(matrix.expansions().0.is_empty());
+        let expansions = matrix.expansions();
+        assert!(expansions.all_expansions.is_empty());
+        assert!(expansions.indirectly_expanded.is_some());
+        assert!(expansions.indirect_exclusions.is_none());
+        assert!(expansions.indirect_inclusions.is_none());
 
-        assert!(!matrix.expands_to_static_values(&Context::parse("matrix.nonexistent").unwrap()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_matrix_expands_indirect_exclusions_inclusions() -> anyhow::Result<()> {
+        let workflow_yaml = r#"
+name: test
+on: push
+jobs:
+  indirect-matrix:
+    name: indirect-matrix
+    runs-on: ubuntu-26.04
+    container:
+      image: ${{ matrix.image }}
+    strategy:
+      matrix:
+        arch: [x86_64, aarch64]
+        image:
+          - ubuntu@latest
+        include: ${{ fromJSON(vars.EXTRA_TARGETS) }}
+        exclude: ${{ fromJSON(vars.KNOWN_BROKEN_COMBOS) }}
+    steps:
+      - name: Noop
+        run: true
+        "#;
+
+        let workflow = Workflow::from_string(
+            workflow_yaml.into(),
+            InputKey::local("fakegroup".into(), "indirect-matrix.yml", None, None),
+        )?;
+
+        let job = {
+            let github_actions_models::workflow::Job::NormalJob(job) =
+                workflow.jobs.get("indirect-matrix").unwrap()
+            else {
+                panic!("Expected a normal job");
+            };
+
+            NormalJob::new("indirect-matrix", job, &workflow)
+        };
+
+        let matrix = Matrix::new(&job).unwrap();
+        let expansions = matrix.expansions();
+
+        assert_eq!(expansions.all_expansions.iter().count(), 3);
+        assert!(expansions.indirectly_expanded.is_none());
+        assert!(expansions.indirect_inclusions.is_some());
+        assert!(expansions.indirect_exclusions.is_some());
 
         Ok(())
     }

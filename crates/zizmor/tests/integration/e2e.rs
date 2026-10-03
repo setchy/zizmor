@@ -2,12 +2,13 @@
 
 use anyhow::Result;
 
-use crate::common::{OutputMode, input_under_test, zizmor};
+use crate::common::{NetworkMode, OutputMode, WorkspaceBuilder, input_under_test, zizmor};
 
 mod anchors;
 mod collect;
 mod crater;
 mod json_v1;
+mod parallel_steps;
 
 #[cfg_attr(not(feature = "gh-token-tests"), ignore)]
 #[test]
@@ -17,7 +18,7 @@ fn gha_hazmat() -> Result<()> {
     // configuration.
     insta::assert_snapshot!(
         zizmor()
-            .offline(false)
+            .offline(NetworkMode::AssertOnline)
             .output(OutputMode::Both)
             .args(["--no-online-audits"])
             .input("woodruffw/gha-hazmat@83e7e24df76fe8b5c0a1748b6fb24107a0e4fa61")
@@ -34,11 +35,34 @@ fn issue_569() -> Result<()> {
     // expressions (i.e. inside comments).
     insta::assert_snapshot!(
         zizmor()
-            .offline(false)
-            .output(OutputMode::Both)
+            .offline(NetworkMode::AssertOnline)
+            .output(OutputMode::Stderr)
             .args(["--no-online-audits", "--collect=workflows"])
             .input("python/cpython@f963239ff1f986742d4c6bab2ab7b73f5a4047f6")
-            .run()?
+            .run()?,
+        @"
+    INFO zizmor: 🌈 zizmor v@@VERSION@@
+    INFO audit: zizmor: 🌈 completed .github/workflows/add-issue-header.yml
+    INFO audit: zizmor: 🌈 completed .github/workflows/build.yml
+    INFO audit: zizmor: 🌈 completed .github/workflows/documentation-links.yml
+    INFO audit: zizmor: 🌈 completed .github/workflows/jit.yml
+    INFO audit: zizmor: 🌈 completed .github/workflows/lint.yml
+    INFO audit: zizmor: 🌈 completed .github/workflows/mypy.yml
+    INFO audit: zizmor: 🌈 completed .github/workflows/new-bugs-announce-notifier.yml
+    INFO audit: zizmor: 🌈 completed .github/workflows/project-updater.yml
+    INFO audit: zizmor: 🌈 completed .github/workflows/require-pr-label.yml
+    INFO audit: zizmor: 🌈 completed .github/workflows/reusable-context.yml
+    INFO audit: zizmor: 🌈 completed .github/workflows/reusable-docs.yml
+    INFO audit: zizmor: 🌈 completed .github/workflows/reusable-macos.yml
+    INFO audit: zizmor: 🌈 completed .github/workflows/reusable-tsan.yml
+    INFO audit: zizmor: 🌈 completed .github/workflows/reusable-ubuntu.yml
+    INFO audit: zizmor: 🌈 completed .github/workflows/reusable-wasi.yml
+    INFO audit: zizmor: 🌈 completed .github/workflows/reusable-windows-msi.yml
+    INFO audit: zizmor: 🌈 completed .github/workflows/reusable-windows.yml
+    INFO audit: zizmor: 🌈 completed .github/workflows/stale.yml
+    INFO audit: zizmor: 🌈 completed .github/workflows/tail-call.yml
+    INFO audit: zizmor: 🌈 completed .github/workflows/verify-ensurepip-wheels.yml
+    "
     );
     Ok(())
 }
@@ -51,7 +75,7 @@ fn issue_726() -> Result<()> {
     // See: https://github.com/woodruffw-experiments/zizmor-bug-726
     insta::assert_snapshot!(
         zizmor()
-            .offline(false)
+            .offline(NetworkMode::AssertOnline)
             .output(OutputMode::Both)
             .args(["--no-online-audits"])
             .input("woodruffw-experiments/zizmor-bug-726@a038d1a35")
@@ -77,6 +101,30 @@ fn menagerie() -> Result<()> {
             .args(["--collect=all"])
             .input(input_under_test("e2e-menagerie"))
             .run()?,
+    );
+
+    Ok(())
+}
+
+/// Regression test for #1907.
+///
+/// Ensures that directory collection finds workflows when invoked
+/// from inside `.github/` with a relative path.
+#[test]
+fn issue_1907() -> Result<()> {
+    let working_dir = format!("{}/.github", input_under_test("issue-1907-repro"));
+
+    insta::assert_snapshot!(
+        zizmor()
+            .output(OutputMode::Both)
+            .working_dir(working_dir)
+            .input("./workflows")
+            .run()?,
+        @"
+     INFO zizmor: 🌈 zizmor v@@VERSION@@
+     INFO audit: zizmor: 🌈 completed @@INPUT@@/test.yml
+    No findings to report. Good job! (1 suppressed)
+    "
     );
 
     Ok(())
@@ -232,7 +280,7 @@ fn invalid_config_file() -> Result<()> {
             .input(input_under_test("e2e-menagerie"))
             .run()?,
         @"
-    🌈 zizmor v@@VERSION@@
+     INFO zizmor: 🌈 zizmor v@@VERSION@@
     fatal: no audit was performed
     error: configuration error in @@CONFIG@@
       |
@@ -279,12 +327,12 @@ fn invalid_inputs() -> Result<()> {
             .args(["--strict-collection"])
             .run()?,
         @"
-    🌈 zizmor v@@VERSION@@
+     INFO zizmor: 🌈 zizmor v@@VERSION@@
     fatal: no audit was performed
     error: no inputs collected
       |
       = help: collection yielded no auditable inputs
-      = help: inputs must contain at least one valid workflow, action, or Dependabot config
+      = help: at least one valid, auditable input must be given
 
     Caused by:
         no inputs collected
@@ -309,7 +357,7 @@ fn test_issue_1394() -> Result<()> {
             .args(["--strict-collection"])
             .run()?,
         @r#"
-    🌈 zizmor v@@VERSION@@
+     INFO zizmor: 🌈 zizmor v@@VERSION@@
     fatal: no audit was performed
     failed to load file://@@INPUT@@ as workflow
 
@@ -328,13 +376,13 @@ fn test_issue_1394() -> Result<()> {
             ))
             .run()?,
         @r#"
-    🌈 zizmor v@@VERSION@@
+     INFO zizmor: 🌈 zizmor v@@VERSION@@
      WARN collect_inputs: zizmor::registry::input: failed to parse input: jobs.demo.steps[0]: duplicate entry with key "env" at line 10 column 9
     fatal: no audit was performed
     error: no inputs collected
       |
       = help: collection yielded no auditable inputs
-      = help: inputs must contain at least one valid workflow, action, or Dependabot config
+      = help: at least one valid, auditable input must be given
 
     Caused by:
         no inputs collected
@@ -381,7 +429,7 @@ fn issue_1116_strict_collection_remote_input() -> Result<()> {
     // Fails with `--strict-collection`.
     insta::assert_snapshot!(
         zizmor()
-            .offline(false)
+            .offline(NetworkMode::AssertOnline)
             .expects_failure(1)
             .output(OutputMode::Stderr)
             .args(["--strict-collection"])
@@ -392,7 +440,7 @@ fn issue_1116_strict_collection_remote_input() -> Result<()> {
     // Works without `--strict-collection`.
     insta::assert_snapshot!(
         zizmor()
-            .offline(false)
+            .offline(NetworkMode::AssertOnline)
             .output(OutputMode::Stderr)
             .input("woodruffw-experiments/zizmor-issue-1116@f41c414")
             .run()?
@@ -413,7 +461,7 @@ fn issue_1065() -> Result<()> {
             .input(input_under_test("issue-1065.yml"))
             .run()?,
         @"
-    🌈 zizmor v@@VERSION@@
+     INFO zizmor: 🌈 zizmor v@@VERSION@@
      INFO audit: zizmor: 🌈 completed @@INPUT@@
     warning[excessive-permissions]: overly broad permissions
       --> @@INPUT@@:12:3
@@ -458,9 +506,8 @@ fn warn_on_min_severity_unknown() -> Result<()> {
             .input(input_under_test("e2e-menagerie"))
             .run()?,
         @"
-    🌈 zizmor v@@VERSION@@
-     WARN zizmor: `unknown` is a deprecated minimum severity that has no effect
-     WARN zizmor: future versions of zizmor will reject this value
+    WARN zizmor: `unknown` is a deprecated minimum severity that has no effect
+    WARN zizmor: future versions of zizmor will reject this value
     "
     );
 
@@ -479,11 +526,39 @@ fn warn_on_min_confidence_unknown() -> Result<()> {
             .input(input_under_test("e2e-menagerie"))
             .run()?,
         @"
-    🌈 zizmor v@@VERSION@@
-     WARN zizmor: `unknown` is a deprecated minimum confidence that has no effect
-     WARN zizmor: future versions of zizmor will reject this value
+    WARN zizmor: `unknown` is a deprecated minimum confidence that has no effect
+    WARN zizmor: future versions of zizmor will reject this value
     "
     );
+    Ok(())
+}
+
+/// Ensures that we emit an appropriate warning if the user is running
+/// in offline mode "implicitly," i.e. without an explicit `--offline`
+/// and without a GitHub token.
+#[test]
+fn warn_on_implicit_offline() -> Result<()> {
+    insta::assert_snapshot!(
+        zizmor()
+            .output(OutputMode::Stderr)
+            .setenv("RUST_LOG", "warn")
+            .offline(NetworkMode::Implicit)
+            .input(input_under_test("neutral.yml"))
+            .run()?,
+        @" WARN zizmor: zizmor is running in offline mode by default; some audits and auto-fixes will not be available. see https://docs.zizmor.sh/usage/#operating-modes for details"
+    );
+
+    // Inverse: don't warn on explcit `--offline`, since the user's intent was clear.
+    insta::assert_snapshot!(
+        zizmor()
+            .output(OutputMode::Stderr)
+            .setenv("RUST_LOG", "warn")
+            .offline(NetworkMode::ExplicitOffline)
+            .input(input_under_test("neutral.yml"))
+            .run()?,
+        @""
+    );
+
     Ok(())
 }
 
@@ -518,11 +593,11 @@ fn issue_1286() -> Result<()> {
         zizmor()
             .expects_failure(1)
             .output(OutputMode::Both)
-            .offline(false)
+            .offline(NetworkMode::AssertOnline)
             .input(input_under_test("issue-1286.yml"))
             .run()?,
         @"
-    🌈 zizmor v@@VERSION@@
+     INFO zizmor: 🌈 zizmor v@@VERSION@@
     fatal: no audit was performed
     'ref-confusion' audit failed on file://@@INPUT@@
 
@@ -548,12 +623,12 @@ fn issue_1300() -> Result<()> {
         zizmor()
             .expects_failure(1)
             .output(OutputMode::Both)
-            .offline(false)
+            .offline(NetworkMode::AssertOnline)
             .args(["--collect=workflows"])
             .input("woodruffw-experiments/empty")
             .run()?,
         @"
-    🌈 zizmor v@@VERSION@@
+     INFO zizmor: 🌈 zizmor v@@VERSION@@
     fatal: no audit was performed
     error: input @@INPUT@@ doesn't contain any workflows
       |
@@ -563,7 +638,7 @@ fn issue_1300() -> Result<()> {
     Caused by:
         0: input @@INPUT@@ doesn't contain any workflows
         1: request error while accessing GitHub API
-        2: HTTP status client error (404 Not Found) for url (https://api.github.com/repos/@@INPUT@@/contents/.github/workflows)
+        2: HTTP status client error (404 Not Found) for url (https://api.github.com/repos/@@INPUT@@/contents/.github/workflows?ref=HEAD)
     "
     );
 
@@ -578,7 +653,6 @@ fn issue_1300() -> Result<()> {
 fn issue_1341() -> Result<()> {
     insta::assert_snapshot!(
         zizmor()
-            .offline(true)
             .input(input_under_test(
                 "issue-1341-repro/.github/workflows/dependabot.yml"
             ))
@@ -610,17 +684,73 @@ fn issue_1356_lsp_mode_starts() -> Result<()> {
     Ok(())
 }
 
+/// Regression test for #1745
+///
+/// Ensures that the `.github` prefix is not stripped from the path.
+#[test]
+fn issue_1745() -> Result<()> {
+    let workspace = WorkspaceBuilder::new()
+        .is_git_repo(true)
+        .root_name("issue-1745-repro")
+        .build()?;
+
+    workspace.copy(&*input_under_test("issue-1745-repro/"), ".");
+
+    // Trivial case: auditing from the root produes root-relative paths in the output.
+    insta::assert_snapshot!(
+        zizmor()
+            .no_config(true)
+            .working_dir(workspace.path())
+            .args([".", "--format=github"])
+            .run()?,
+        @"
+    ::warning file=.github/workflows/test.yml,line=10,title=artipacked::test.yml:10: credential persistence through GitHub Actions artifacts: does not set persist-credentials: false
+    ::error file=.github/workflows/test.yml,line=10,title=unpinned-uses::test.yml:10: unpinned action reference: action is not pinned to a hash (required by blanket policy)
+    "
+    );
+
+    // Auditing with `./.github` as the working directory still produces root-relative paths.
+    insta::assert_snapshot!(
+        zizmor()
+            .no_config(true)
+            .working_dir(workspace.path().join(".github"))
+            // Observe that we pass the input as a raw argument here and below,
+            // to avoid redaction. This makes snapshots clearer.
+            .args([".", "--format=github"])
+            .run()?,
+        @"
+    ::warning file=.github/workflows/test.yml,line=10,title=artipacked::test.yml:10: credential persistence through GitHub Actions artifacts: does not set persist-credentials: false
+    ::error file=.github/workflows/test.yml,line=10,title=unpinned-uses::test.yml:10: unpinned action reference: action is not pinned to a hash (required by blanket policy)
+    "
+    );
+
+    // Auditing with the root as the working directory and `.github` as the input
+    // still produces root-relative paths.
+    insta::assert_snapshot!(
+        zizmor()
+            .no_config(true)
+            .working_dir(workspace.path())
+            .args([".github", "--format=github"])
+            .run()?,
+        @"
+    ::warning file=.github/workflows/test.yml,line=10,title=artipacked::test.yml:10: credential persistence through GitHub Actions artifacts: does not set persist-credentials: false
+    ::error file=.github/workflows/test.yml,line=10,title=unpinned-uses::test.yml:10: unpinned action reference: action is not pinned to a hash (required by blanket policy)
+    "
+    );
+
+    Ok(())
+}
+
 #[test]
 fn test_cant_retrieve_offline() -> Result<()> {
     // Fails because --offline prevents network access.
     insta::assert_snapshot!(
         zizmor()
             .expects_failure(1)
-            .offline(true)
             .args(["pypa/sampleproject"])
             .run()?,
         @"
-    🌈 zizmor v@@VERSION@@
+     INFO zizmor: 🌈 zizmor v@@VERSION@@
     fatal: no audit was performed
     error: can't fetch remote repository: pypa/sampleproject
       |
@@ -641,12 +771,12 @@ fn test_cant_retrieve_no_gh_token() -> Result<()> {
     insta::assert_snapshot!(
         zizmor()
             .expects_failure(1)
-            .offline(false)
+            .offline(NetworkMode::AssertOnline)
             .gh_token(false)
             .args(["pypa/sampleproject"])
             .run()?,
         @"
-    🌈 zizmor v@@VERSION@@
+     INFO zizmor: 🌈 zizmor v@@VERSION@@
     fatal: no audit was performed
     error: can't fetch remote repository: pypa/sampleproject
       |
@@ -664,14 +794,13 @@ fn test_cant_retrieve_no_gh_token() -> Result<()> {
 fn test_github_output() -> Result<()> {
     insta::assert_snapshot!(
         zizmor()
-            .offline(true)
             .input(input_under_test("several-vulnerabilities.yml"))
             .args(["--persona=auditor", "--format=github"])
             .run()?,
         @"
     ::error file=@@INPUT@@,line=5,title=excessive-permissions::several-vulnerabilities.yml:5: overly broad permissions: uses write-all permissions
     ::error file=@@INPUT@@,line=11,title=excessive-permissions::several-vulnerabilities.yml:11: overly broad permissions: uses write-all permissions
-    ::error file=@@INPUT@@,line=2,title=dangerous-triggers::several-vulnerabilities.yml:2: use of fundamentally insecure workflow trigger: pull_request_target is almost always used insecurely
+    ::error file=@@INPUT@@,line=3,title=dangerous-triggers::several-vulnerabilities.yml:3: use of fundamentally insecure workflow trigger: pull_request_target is almost always used insecurely
     ::error file=@@INPUT@@,line=16,title=template-injection::several-vulnerabilities.yml:16: code injection via template expansion: may expand into attacker-controllable code
     ::warning file=@@INPUT@@,line=2,title=concurrency-limits::several-vulnerabilities.yml:2: insufficient job-level concurrency limits: workflow is missing concurrency setting
     "
@@ -684,7 +813,6 @@ fn test_github_output() -> Result<()> {
 fn test_sarif_zizmor_properties() -> Result<()> {
     insta::assert_snapshot!(
         zizmor()
-            .offline(true)
             .input(input_under_test("several-vulnerabilities.yml"))
             .args(["--format=sarif"])
             .run()?
@@ -697,7 +825,6 @@ fn test_sarif_zizmor_properties() -> Result<()> {
 #[test]
 fn test_show_urls() -> Result<()> {
     let with_urls = zizmor()
-        .offline(true)
         .show_audit_urls(true)
         .input(input_under_test("several-vulnerabilities.yml"))
         .run()?;
@@ -705,12 +832,126 @@ fn test_show_urls() -> Result<()> {
     assert!(with_urls.contains("audit documentation → "));
 
     let without_urls = zizmor()
-        .offline(true)
         .show_audit_urls(false)
         .input(input_under_test("several-vulnerabilities.yml"))
         .run()?;
 
     assert!(!without_urls.contains("audit documentation → "));
+
+    Ok(())
+}
+
+#[test]
+fn test_no_ignores() -> Result<()> {
+    // By default, the only finding should be ignored.
+    insta::assert_snapshot!(
+        zizmor()
+            .input(input_under_test("ignore.yml"))
+            .run()?,
+        @"No findings to report. Good job! (1 ignored)"
+    );
+
+    // With `--no-ignores`, the ignored finding should be included in the output.
+    insta::assert_snapshot!(
+        zizmor()
+            .input(input_under_test("ignore.yml"))
+            .args(["--no-ignores"])
+            .run()?,
+        @r#"
+    error[template-injection]: code injection via template expansion
+      --> @@INPUT@@:17:24
+       |
+    17 |         run: echo "${{ github.ref }}" # zizmor: ignore[template-injection]
+       |         ---            ^^^^^^^^^^ may expand into attacker-controllable code
+       |         |
+       |         this run block
+       |
+       = note: audit confidence → High
+       = note: this finding has an auto-fix
+
+    1 findings (1 unsafe fixes): 0 informational, 0 low, 0 medium, 1 high
+    "#
+    );
+
+    Ok(())
+}
+
+/// Regression test for #2182.
+///
+/// Ensures that `--collect=[MODE]` is respected for remote inputs.
+#[cfg_attr(not(feature = "gh-token-tests"), ignore)]
+#[test]
+fn issue_2182() -> Result<()> {
+    // Does not fail even though the repo contains an invalid `junk.yml` workflow,
+    // since only actions are collected.
+    insta::assert_snapshot!(
+        zizmor()
+            .offline(NetworkMode::AssertOnline)
+            .output(OutputMode::Stderr)
+            .args(["--collect=actions"])
+            .input(
+                "woodruffw-experiments/zizmor-issue-2182@74a136e0e7d58127e47ad87fd5db72370634e2f9"
+            )
+            .run()?,
+        @"
+    INFO zizmor: 🌈 zizmor v@@VERSION@@
+    INFO collect_inputs: zizmor::registry::input: collected 1 inputs from woodruffw-experiments/zizmor-issue-2182
+    INFO audit: zizmor: 🌈 completed dummy/action.yml
+    "
+    );
+
+    Ok(())
+}
+
+/// Regression test for #2202.
+///
+/// Ensures that we produce a reasonable error message when the user
+/// asks us to audit an ambiguous remote input (one where the @<ref>
+/// is both a branch and a tag).
+#[cfg_attr(not(feature = "gh-token-tests"), ignore)]
+#[test]
+fn issue_2202() -> Result<()> {
+    insta::assert_snapshot!(
+        zizmor()
+            .offline(NetworkMode::AssertOnline)
+            .output(OutputMode::Stderr)
+            .expects_failure(1)
+            .input(
+                "woodruffw-experiments/zizmor-issue-2202@v1"
+            )
+            .run()?,
+        @r#"
+     INFO zizmor: 🌈 zizmor v@@VERSION@@
+    fatal: no audit was performed
+    error: remote input has an ambiguous Git reference ("v1" is both a tag and a branch)
+      |
+      = help: disambiguate the Git ref by putting it in the right namespace
+      = help: example: woodruffw-experiments/zizmor-issue-2202@refs/heads/v1
+      = help: example: woodruffw-experiments/zizmor-issue-2202@refs/tags/v1
+
+    Caused by:
+        remote input has an ambiguous Git reference ("v1" is both a tag and a branch)
+    "#
+    );
+
+    Ok(())
+}
+
+/// Primarily a backstop test: `neutral.yml` is what we use whenever we need
+/// a valid but completely fine workflow, so it should never have any findings in it.
+#[cfg_attr(not(feature = "gh-token-tests"), ignore)]
+#[test]
+fn test_neutral_no_findings() -> anyhow::Result<()> {
+    let findings = serde_json::from_str::<Vec<serde_json::Value>>(
+        zizmor()
+            .offline(NetworkMode::AssertOnline)
+            .args(["--format=json-v1"])
+            .input(input_under_test("neutral.yml"))
+            .run()?
+            .as_str(),
+    )?;
+
+    assert!(findings.is_empty());
 
     Ok(())
 }

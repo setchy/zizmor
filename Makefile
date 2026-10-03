@@ -28,9 +28,7 @@ docs/snippets/sponsors.html: docs/snippets/sponsors.json docs/snippets/render-sp
 
 .PHONY: refresh-schemas
 refresh-schemas:
-	curl https://www.schemastore.org/github-workflow.json > crates/zizmor/src/data/github-workflow.json
-	curl https://www.schemastore.org/github-action.json > crates/zizmor/src/data/github-action.json
-	curl https://www.schemastore.org/dependabot-2.0.json > crates/zizmor/src/data/dependabot-2.0.json
+	support/fetch-schemas.py
 
 .PHONY: webhooks-to-contexts
 webhooks-to-contexts:
@@ -42,13 +40,17 @@ codeql-injection-sinks: crates/zizmor/data/codeql-injection-sinks.json
 crates/zizmor/data/codeql-injection-sinks.json: support/codeql-injection-sinks.py
 	$< > $@
 
+.PHONY: sync-expression-tests
+sync-expression-tests:
+	support/sync-expression-tests.py
+
 .PHONY: archived-repos
 archived-repos:
 	support/archived-repos.py
 
 .PHONY: pinact
 pinact:
-	pinact run --update --verify --config=.github/pinact.yml
+	GITHUB_TOKEN=$$(gh auth token) pinact run --update --verify --config=.github/pinact.yml
 
 
 .PHONY: bench

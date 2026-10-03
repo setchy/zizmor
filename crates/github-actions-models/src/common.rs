@@ -11,6 +11,16 @@ use serde::{Deserialize, Deserializer, Serialize, de};
 
 pub mod expr;
 
+/// `cache-mode` for a workflow or job.
+#[derive(Copy, Clone, Deserialize, Debug, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CacheMode {
+    Read,
+    Write,
+    WriteOnly,
+    None,
+}
+
 /// `permissions` for a workflow, job, or step.
 #[derive(Deserialize, Debug, PartialEq)]
 #[serde(rename_all = "kebab-case", untagged)]
@@ -95,7 +105,7 @@ impl EnvValue {
     /// For example, `foo:` and `foo: ''` would both return true.
     pub fn is_empty(&self) -> bool {
         match self {
-            EnvValue::String(s) => s.is_empty(),
+            Self::String(s) => s.is_empty(),
             _ => false,
         }
     }
@@ -106,11 +116,26 @@ impl EnvValue {
     /// This follows the semantics of C#'s `Boolean.TryParse`, where
     /// the case-insensitive string "true" is considered true, but
     /// "1", "yes", etc. are not.
-    pub fn csharp_trueish(&self) -> bool {
+    pub fn csharp_bool(&self) -> bool {
         match self {
-            EnvValue::Boolean(true) => true,
-            EnvValue::String(maybe) => maybe.trim().eq_ignore_ascii_case("true"),
+            Self::Boolean(true) => true,
+            Self::String(maybe) => maybe.trim().eq_ignore_ascii_case("true"),
             _ => false,
+        }
+    }
+
+    /// Returns whether this [`EnvValue`] as a boolean according to the
+    /// rules for `getBooleanInput` in `actions/toolkit`.
+    ///
+    /// Returns `None` if this value cannot be interpreted as a boolean according to those rules.
+    ///
+    /// See: <https://github.com/actions/toolkit/blob/b68d04/packages/core/src/core.ts#L198>
+    pub fn actions_toolkit_bool(&self) -> Option<bool> {
+        match self {
+            Self::Boolean(b) => Some(*b),
+            Self::String(s) if matches!(s.trim(), "true" | "True" | "TRUE") => Some(true),
+            Self::String(s) if matches!(s.trim(), "false" | "False" | "FALSE") => Some(false),
+            _ => None,
         }
     }
 }
@@ -127,7 +152,7 @@ enum SoV<T> {
 }
 
 impl<T> From<SoV<T>> for Vec<T> {
-    fn from(val: SoV<T>) -> Vec<T> {
+    fn from(val: SoV<T>) -> Self {
         match val {
             SoV::One(v) => vec![v],
             SoV::Many(vs) => vs,
@@ -141,6 +166,33 @@ where
     T: Deserialize<'de>,
 {
     SoV::deserialize(de).map(Into::into)
+}
+
+/// A "bool or unit" type, for places where GitHub Actions uses
+/// a bare key (like `wait:`) to indicate a "true" value.
+///
+/// This only appears internally, as an intermediate type for `bool_or_unit`.
+#[derive(Deserialize, Debug, PartialEq)]
+#[serde(untagged)]
+enum BoU {
+    Bool(bool),
+    Unit(()),
+}
+
+impl From<BoU> for bool {
+    fn from(value: BoU) -> Self {
+        match value {
+            BoU::Bool(bool) => bool,
+            BoU::Unit(_) => true,
+        }
+    }
+}
+
+pub(crate) fn bool_or_unit<'de, D>(de: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    BoU::deserialize(de).map(Into::into)
 }
 
 /// A bool or string. This is useful for cases where GitHub Actions contextually
@@ -195,10 +247,10 @@ impl<'de> Deserialize<'de> for If {
         }
 
         match RawIf::deserialize(deserializer)? {
-            RawIf::Bool(b) => Ok(If::Bool(b)),
-            RawIf::Int(n) => Ok(If::Bool(n != 0)),
-            RawIf::Float(f) => Ok(If::Bool(f != 0.0 && !f.is_nan())),
-            RawIf::Expr(s) => Ok(If::Expr(s)),
+            RawIf::Bool(b) => Ok(Self::Bool(b)),
+            RawIf::Int(n) => Ok(Self::Bool(n != 0)),
+            RawIf::Float(f) => Ok(Self::Bool(f != 0.0 && !f.is_nan())),
+            RawIf::Expr(s) => Ok(Self::Expr(s)),
         }
     }
 }
@@ -247,7 +299,7 @@ impl Uses {
         let uses = uses.into();
         let uses = uses.trim();
 
-        if uses.starts_with("./") {
+        if uses.starts_with("./") || uses.starts_with("$/") {
             Ok(Self::Local(LocalUses::new(uses)))
         } else if let Some(image) = uses.strip_prefix("docker://") {
             Ok(Self::Docker(DockerUses::parse(image)))
@@ -259,9 +311,9 @@ impl Uses {
     /// Returns the original raw `uses:` clause.
     pub fn raw(&self) -> &str {
         match self {
-            Uses::Local(local) => &local.path,
-            Uses::Repository(repo) => repo.raw(),
-            Uses::Docker(docker) => docker.raw(),
+            Self::Local(local) => local.raw(),
+            Self::Repository(repo) => repo.raw(),
+            Self::Docker(docker) => docker.raw(),
         }
     }
 }
@@ -270,12 +322,25 @@ impl Uses {
 #[derive(Debug, PartialEq)]
 #[non_exhaustive]
 pub struct LocalUses {
-    pub path: String,
+    path: String,
 }
 
 impl LocalUses {
     fn new(path: impl Into<String>) -> Self {
-        LocalUses { path: path.into() }
+        Self { path: path.into() }
+    }
+
+    /// Whether this [`LocalUses`] is a "self-referencing" action,
+    /// i.e. references the repository it's being used from.
+    ///
+    /// See: <https://github.blog/changelog/2026-07-30-reference-same-repository-actions-with-self-repository-syntax/>
+    pub fn is_self_repository(&self) -> bool {
+        self.path.starts_with('$')
+    }
+
+    /// Return the path referenced by this [`LocalUses`].
+    pub fn raw(&self) -> &str {
+        &self.path
     }
 }
 
@@ -352,7 +417,7 @@ impl Display for RepositoryUses {
 impl RepositoryUses {
     /// Parse a `uses: some/repo` clause.
     pub fn parse(uses: impl Into<String>) -> Result<Self, UsesError> {
-        RepositoryUses::try_new(uses.into(), |s| {
+        Self::try_new(uses.into(), |s| {
             let inner = RepositoryUsesInner::from_str(s)?;
             Ok(inner)
         })
@@ -467,7 +532,7 @@ self_cell!(
 impl DockerUses {
     /// Parse a `uses: docker://some-image` clause.
     pub fn parse(uses: impl Into<String>) -> Self {
-        DockerUses::new(uses.into(), |s| DockerUsesInner::from_str(s))
+        Self::new(uses.into(), |s| DockerUsesInner::from_str(s))
     }
 
     /// Get the raw uses clause. This does not include the `docker://` prefix.
@@ -502,7 +567,7 @@ impl<'de> Deserialize<'de> for DockerUses {
         D: Deserializer<'de>,
     {
         let uses = <Cow<'de, str>>::deserialize(deserializer)?;
-        Ok(DockerUses::parse(uses))
+        Ok(Self::parse(uses))
     }
 }
 
@@ -570,13 +635,13 @@ mod tests {
     #[test]
     fn test_permissions() {
         assert_eq!(
-            serde_yaml::from_str::<Permissions>("read-all").unwrap(),
+            yaml_serde::from_str::<Permissions>("read-all").unwrap(),
             Permissions::Base(BasePermission::ReadAll)
         );
 
         let perm = "security-events: write";
         assert_eq!(
-            serde_yaml::from_str::<Permissions>(perm).unwrap(),
+            yaml_serde::from_str::<Permissions>(perm).unwrap(),
             Permissions::Explicit(IndexMap::from([(
                 "security-events".into(),
                 Permission::Write
@@ -588,7 +653,7 @@ mod tests {
     fn test_env_empty_value() {
         let env = "foo:";
         assert_eq!(
-            serde_yaml::from_str::<Env>(env).unwrap()["foo"],
+            yaml_serde::from_str::<Env>(env).unwrap()["foo"],
             EnvValue::String("".into())
         );
     }
@@ -614,7 +679,7 @@ mod tests {
         ];
 
         for (val, expected) in vectors {
-            assert_eq!(val.csharp_trueish(), expected, "failed for {val:?}");
+            assert_eq!(val.csharp_bool(), expected, "failed for {val:?}");
         }
     }
 
@@ -916,6 +981,18 @@ mod tests {
         "#
         );
 
+        // Valid: new $-style local uses.
+        insta::assert_debug_snapshot!(
+            Uses::parse("$/.github/actions/hello-world-action").unwrap(),
+            @r#"
+        Local(
+            LocalUses {
+                path: "$/.github/actions/hello-world-action",
+            },
+        )
+        "#
+        );
+
         // Invalid: missing user/repo
         insta::assert_debug_snapshot!(
             Uses::parse("checkout@8f4b7f84864484a7bf31766abe9204da3cbe65b3").unwrap_err(),
@@ -984,7 +1061,7 @@ mod tests {
         struct Dummy(#[serde(deserialize_with = "reusable_step_uses")] Uses);
 
         insta::assert_debug_snapshot!(
-            serde_yaml::from_str::<Dummy>(
+            yaml_serde::from_str::<Dummy>(
                 "octo-org/this-repo/.github/workflows/workflow-1.yml@172239021f7ba04fe7327647b213799853a9eb89"
             )
             .map(|d| d.0)
@@ -1008,7 +1085,7 @@ mod tests {
         );
 
         insta::assert_debug_snapshot!(
-            serde_yaml::from_str::<Dummy>(
+            yaml_serde::from_str::<Dummy>(
                 "octo-org/this-repo/.github/workflows/workflow-1.yml@notahash"
             ).map(|d| d.0).unwrap(),
             @r#"
@@ -1030,7 +1107,7 @@ mod tests {
         );
 
         insta::assert_debug_snapshot!(
-            serde_yaml::from_str::<Dummy>(
+            yaml_serde::from_str::<Dummy>(
                 "octo-org/this-repo/.github/workflows/workflow-1.yml@abcd"
             ).map(|d| d.0).unwrap(),
             @r#"
@@ -1053,7 +1130,7 @@ mod tests {
 
         // Invalid: remote reusable workflow without ref
         insta::assert_debug_snapshot!(
-            serde_yaml::from_str::<Dummy>(
+            yaml_serde::from_str::<Dummy>(
                 "octo-org/this-repo/.github/workflows/workflow-1.yml"
             ).map(|d| d.0).unwrap_err(),
             @r#"Error("malformed `uses` ref: missing `@<ref>` in octo-org/this-repo/.github/workflows/workflow-1.yml")"#
@@ -1061,7 +1138,7 @@ mod tests {
 
         // Invalid: local reusable workflow with ref
         insta::assert_debug_snapshot!(
-            serde_yaml::from_str::<Dummy>(
+            yaml_serde::from_str::<Dummy>(
                 "./.github/workflows/workflow-1.yml@172239021f7ba04fe7327647b213799853a9eb89"
             ).map(|d| d.0).unwrap_err(),
             @r#"Error("local reusable workflow reference can't specify `@<ref>`")"#
@@ -1069,7 +1146,7 @@ mod tests {
 
         // Invalid: no ref at all
         insta::assert_debug_snapshot!(
-            serde_yaml::from_str::<Dummy>(
+            yaml_serde::from_str::<Dummy>(
                 ".github/workflows/workflow-1.yml"
             ).map(|d| d.0).unwrap_err(),
             @r#"Error("malformed `uses` ref: missing `@<ref>` in .github/workflows/workflow-1.yml")"#
@@ -1077,10 +1154,25 @@ mod tests {
 
         // Invalid: missing user/repo
         insta::assert_debug_snapshot!(
-            serde_yaml::from_str::<Dummy>(
+            yaml_serde::from_str::<Dummy>(
                 "workflow-1.yml@172239021f7ba04fe7327647b213799853a9eb89"
             ).map(|d| d.0).unwrap_err(),
             @r#"Error("malformed `uses` ref: owner/repo slug is too short: workflow-1.yml@172239021f7ba04fe7327647b213799853a9eb89")"#
         );
+    }
+
+    #[test]
+    fn test_bool_or_unit() {
+        #[derive(Deserialize)]
+        struct Dummy {
+            #[serde(deserialize_with = "crate::common::bool_or_unit")]
+            x: bool,
+        }
+
+        assert!(yaml_serde::from_str::<Dummy>("x:").unwrap().x);
+        // TODO: Not sure if this is an overcorrection.
+        assert!(yaml_serde::from_str::<Dummy>("x: null").unwrap().x);
+        assert!(yaml_serde::from_str::<Dummy>("x: true").unwrap().x);
+        assert!(!yaml_serde::from_str::<Dummy>("x: false").unwrap().x)
     }
 }

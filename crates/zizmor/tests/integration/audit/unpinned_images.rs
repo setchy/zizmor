@@ -28,7 +28,7 @@ fn test_pedantic_persona() -> anyhow::Result<()> {
       --> @@INPUT@@:40:7
        |
     40 |       image: fake.example.com/example:latest
-       |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ container image is pinned to latest
+       |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ container image uses the floating 'latest' tag
        |
        = note: audit confidence → High
 
@@ -36,7 +36,7 @@ fn test_pedantic_persona() -> anyhow::Result<()> {
       --> @@INPUT@@:49:9
        |
     49 |         image: fake.example.com/redis:latest
-       |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ container image is pinned to latest
+       |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ container image uses the floating 'latest' tag
        |
        = note: audit confidence → High
 
@@ -56,7 +56,55 @@ fn test_pedantic_persona() -> anyhow::Result<()> {
        |
        = note: audit confidence → High
 
-    6 findings: 0 informational, 0 low, 0 medium, 6 high
+    error[unpinned-images]: unpinned image references
+       --> @@INPUT@@:101:50
+        |
+    101 |         image: ${{ inputs.use-redis == 'true' && 'redis:7' || '' }}
+        |                                                  ^^^^^^^^^ container image is not pinned to a SHA256 hash
+        |
+        = note: audit confidence → High
+
+    error[unpinned-images]: unpinned image references
+       --> @@INPUT@@:118:18
+        |
+    118 |       image: ${{ inputs.image || vars.DEFAULT_IMAGE }}
+        |                  ^^^^^^^^^^^^ container image may be unpinned
+        |
+        = note: audit confidence → Low
+
+    error[unpinned-images]: unpinned image references
+       --> @@INPUT@@:118:34
+        |
+    118 |       image: ${{ inputs.image || vars.DEFAULT_IMAGE }}
+        |                                  ^^^^^^^^^^^^^^^^^^ container image may be unpinned
+        |
+        = note: audit confidence → Low
+
+    error[unpinned-images]: unpinned image references
+       --> @@INPUT@@:126:24
+        |
+    126 |       - uses: docker://ubuntu
+        |                        ^^^^^^ container image is unpinned
+        |
+        = note: audit confidence → High
+
+    error[unpinned-images]: unpinned image references
+       --> @@INPUT@@:127:24
+        |
+    127 |       - uses: docker://ubuntu:latest
+        |                        ^^^^^^^^^^^^^ container image uses the floating 'latest' tag
+        |
+        = note: audit confidence → High
+
+    error[unpinned-images]: unpinned image references
+       --> @@INPUT@@:128:24
+        |
+    128 |       - uses: docker://ghcr.io/pypa/gh-action-pypi-publish
+        |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ container image is unpinned
+        |
+        = note: audit confidence → High
+
+    12 findings: 0 informational, 0 low, 0 medium, 12 high
     "
     );
 
@@ -118,7 +166,7 @@ fn test_matrix_in_image_pedantic() -> anyhow::Result<()> {
       --> @@INPUT@@:20:7
        |
     20 |       image: ${{ matrix.image }}
-       |       ^^^^^^^^^^^^^^^^^^^^^^^^^^ container image is pinned to latest
+       |       ^^^^^^^^^^^^^^^^^^^^^^^^^^ container image uses the floating 'latest' tag
     ...
     23 |       matrix:
        |       ------ this matrix
@@ -161,7 +209,7 @@ fn test_matrix_in_image_regular() -> anyhow::Result<()> {
       --> @@INPUT@@:20:7
        |
     20 |       image: ${{ matrix.image }}
-       |       ^^^^^^^^^^^^^^^^^^^^^^^^^^ container image is pinned to latest
+       |       ^^^^^^^^^^^^^^^^^^^^^^^^^^ container image uses the floating 'latest' tag
     ...
     23 |       matrix:
        |       ------ this matrix
@@ -173,6 +221,169 @@ fn test_matrix_in_image_regular() -> anyhow::Result<()> {
 
     4 findings (2 suppressed): 0 informational, 0 low, 0 medium, 2 high
     "
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_matrix_indirect_expansions() -> anyhow::Result<()> {
+    insta::assert_snapshot!(
+        zizmor()
+            .input(input_under_test("unpinned-images/indirect-matrices.yml"))
+            .args(["--persona=pedantic"])
+            .run()?,
+        @"
+    error[unpinned-images]: unpinned image references
+      --> @@INPUT@@:18:7
+       |
+    18 |       image: ${{ matrix.image }}
+       |       ^^^^^^^^^^^^^^^^^^^^^^^^^^ container image may be unpinned
+    19 |     strategy:
+    20 |       matrix: ${{ fromJSON(vars.CUSTOM_TARGETS) }}
+       |       --------------------------------------------
+       |       |
+       |       this matrix
+       |       indirect `matrix` adds unanalyzable combinations
+       |
+       = note: audit confidence → Low
+
+    error[unpinned-images]: unpinned image references
+      --> @@INPUT@@:29:7
+       |
+    29 |       image: ${{ matrix.image }}
+       |       ^^^^^^^^^^^^^^^^^^^^^^^^^^ container image uses the floating 'latest' tag
+    ...
+    32 |       matrix:
+       |       ------ this matrix
+    ...
+    35 |           - ubuntu:latest
+       |             ------------- this expansion of matrix.image
+       |
+       = note: audit confidence → High
+
+    error[unpinned-images]: unpinned image references
+      --> @@INPUT@@:29:7
+       |
+    29 |       image: ${{ matrix.image }}
+       |       ^^^^^^^^^^^^^^^^^^^^^^^^^^ container image may be unpinned
+    ...
+    32 |       matrix:
+       |       ------ this matrix
+    ...
+    36 |         include: ${{ fromJSON(vars.EXTRA_TARGETS) }}
+       |         -------------------------------------------- `include` may add unanalyzable combinations
+       |
+       = note: audit confidence → Low
+
+    error[unpinned-images]: unpinned image references
+      --> @@INPUT@@:45:7
+       |
+    45 |       image: ${{ matrix.image }}
+       |       ^^^^^^^^^^^^^^^^^^^^^^^^^^ container image uses the floating 'latest' tag
+    ...
+    48 |       matrix:
+       |       ------ this matrix
+    ...
+    53 |           - ubuntu:latest
+       |             ------------- this expansion of matrix.image
+       |
+       = note: audit confidence → High
+
+    4 findings: 0 informational, 0 low, 0 medium, 4 high
+    "
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_urllib3_empty_matrix_container_regular() -> anyhow::Result<()> {
+    insta::assert_snapshot!(
+        zizmor()
+            .input(input_under_test(
+                "unpinned-images/urllib3-empty-matrix-container.yml"
+            ))
+            .run()?,
+        @"
+    error[unpinned-images]: unpinned image references
+      --> @@INPUT@@:51:5
+       |
+    20 |       matrix:
+       |       ------ this matrix
+    ...
+    41 |             container: python
+       |             ----------------- this expansion of matrix.container
+    ...
+    51 |     container: ${{ matrix.container }}
+       |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ container image is unpinned
+       |
+       = note: audit confidence → High
+
+    2 findings (1 suppressed): 0 informational, 0 low, 0 medium, 1 high
+    "
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_issue_1942_repro() -> anyhow::Result<()> {
+    insta::assert_snapshot!(
+        zizmor()
+            .input(input_under_test("unpinned-images/issue-1942-repro.yml"))
+            .args(["--persona=pedantic"])
+            .run()?,
+        @"
+    error[unpinned-images]: unpinned image references
+      --> @@INPUT@@:13:5
+       |
+    13 |     container: node:18
+       |     ^^^^^^^^^^^^^^^^^^ container image is not pinned to a SHA256 hash
+       |
+       = note: audit confidence → High
+
+    1 finding: 0 informational, 0 low, 0 medium, 1 high
+    "
+    );
+
+    Ok(())
+}
+
+/// Tests that `unpinned-images` handles Docker-style action definitions, not just images
+/// in jobs/steps within workflows.
+#[test]
+fn test_docker_action() -> anyhow::Result<()> {
+    insta::assert_snapshot!(
+        zizmor()
+            .input(input_under_test("unpinned-images/docker-action/"))
+            .args(["--persona=pedantic"])
+            .run()?,
+        @r#"
+    error[unpinned-images]: unpinned image references
+     --> @@INPUT@@/action.yml:7:3
+      |
+    7 |   image: "docker://ghcr.io/super-linter/super-linter:slim-v8.5.0" # x-release-please-version
+      |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ container image is not pinned to a SHA256 hash
+      |
+      = note: audit confidence → High
+
+    1 finding: 0 informational, 0 low, 0 medium, 1 high
+    "#
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_issue_2097_repro() -> anyhow::Result<()> {
+    // `${{ matrix.mysql || '' }}` expands to either a hash-pinned image or an
+    // empty (absent) container, so there's nothing to report.
+    insta::assert_snapshot!(
+        zizmor()
+            .input(input_under_test("unpinned-images/issue-2097-repro.yml"))
+            .run()?,
+        @"No findings to report. Good job!"
     );
 
     Ok(())

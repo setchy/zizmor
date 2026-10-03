@@ -13,10 +13,10 @@ impl Severity {
     fn as_github_command(&self) -> &str {
         // TODO: Does this mapping make sense?
         match self {
-            Severity::Informational => "notice",
-            Severity::Low => "warning",
-            Severity::Medium => "warning",
-            Severity::High => "error",
+            Self::Informational => "notice",
+            Self::Low => "warning",
+            Self::Medium => "warning",
+            Self::High => "error",
         }
     }
 }
@@ -28,7 +28,7 @@ impl Finding<'_> {
         // NOTE: We intentionally only use the start line, since our spans
         // sometimes end at EOF and GitHub's annotations don't handle that
         // gracefully.
-        let filepath = primary.symbolic.key.sarif_path();
+        let filepath = primary.symbolic.key.best_identifier();
         let start_line = primary.concrete.location.start_point.row + 1;
         let title = self.ident;
 

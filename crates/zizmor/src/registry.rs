@@ -7,7 +7,8 @@ use indexmap::IndexMap;
 
 use crate::{
     audit::{self, Audit, AuditLoadError},
-    finding::{Confidence, Finding, Persona, Severity},
+    cli::FixMode,
+    finding::{Confidence, Finding, FixDisposition, Persona, Severity},
     registry::input::{InputKey, InputRegistry},
     state::AuditState,
 };
@@ -46,6 +47,7 @@ impl AuditRegistry {
 
         register_audit!(audit::artipacked::Artipacked);
         register_audit!(audit::unsound_contains::UnsoundContains);
+        register_audit!(audit::unsound_ternary::UnsoundTernary);
         register_audit!(audit::excessive_permissions::ExcessivePermissions);
         register_audit!(audit::dangerous_triggers::DangerousTriggers);
         register_audit!(audit::impostor_commit::ImpostorCommit);
@@ -75,9 +77,15 @@ impl AuditRegistry {
         register_audit!(audit::dependabot_cooldown::DependabotCooldown);
         register_audit!(audit::concurrency_limits::ConcurrencyLimits);
         register_audit!(audit::archived_uses::ArchivedUses);
+        register_audit!(audit::typosquat_uses::TyposquatUses);
         register_audit!(audit::misfeature::Misfeature);
         register_audit!(audit::secrets_outside_env::SecretsOutsideEnvironment);
         register_audit!(audit::superfluous_actions::SuperfluousActions);
+        register_audit!(audit::github_app::GitHubApp);
+        register_audit!(audit::unpinned_tools::UnpinnedTools);
+        register_audit!(audit::adhoc_packages::AdhocPackages);
+        register_audit!(audit::insecure_url_scheme::InsecureURLScheme);
+        register_audit!(audit::self_repository::SelfRepository);
 
         Ok(registry)
     }
@@ -115,6 +123,7 @@ pub(crate) struct FindingRegistry<'a> {
     minimum_severity: Option<Severity>,
     minimum_confidence: Option<Confidence>,
     persona: Persona,
+    no_ignores: bool,
     suppressed: Vec<Finding<'a>>,
     ignored: Vec<Finding<'a>>,
     findings: Vec<Finding<'a>>,
@@ -127,12 +136,14 @@ impl<'a> FindingRegistry<'a> {
         minimum_severity: Option<Severity>,
         minimum_confidence: Option<Confidence>,
         persona: Persona,
+        no_ignores: bool,
     ) -> Self {
         Self {
             input_registry,
             minimum_severity,
             minimum_confidence,
             persona,
+            no_ignores,
             suppressed: Default::default(),
             ignored: Default::default(),
             findings: Default::default(),
@@ -145,20 +156,32 @@ impl<'a> FindingRegistry<'a> {
     pub(crate) fn extend(&mut self, results: Vec<Finding<'a>>) {
         // TODO: is it faster to iterate like this, or do `find_by_max`
         // and then `extend`?
-        for finding in results {
+        for mut finding in results {
+            finding.determinations.severity = self
+                .input_registry
+                .get_config(finding.input_group())
+                .severity_remap(&finding)
+                .unwrap_or(finding.determinations.severity);
+
+            // A finding is ignored either if it's marked as ignored (i.e. via an ignore comment),
+            // or the config for its input group ignores it, but only the user hasn't
+            // overridden all ignores with `--no-ignores`.
+            let ignored = (finding.ignored
+                || self
+                    .input_registry
+                    .get_config(finding.input_group())
+                    .ignores(&finding))
+                && !self.no_ignores;
+
             if self.persona > finding.determinations.persona {
                 self.suppressed.push(finding);
-            } else if finding.ignored
+            } else if ignored
                 || self
                     .minimum_severity
                     .is_some_and(|min| min > finding.determinations.severity)
                 || self
                     .minimum_confidence
                     .is_some_and(|min| min > finding.determinations.confidence)
-                || self
-                    .input_registry
-                    .get_config(finding.input_group())
-                    .ignores(&finding)
             {
                 self.ignored.push(finding);
             } else {
@@ -201,9 +224,7 @@ impl<'a> FindingRegistry<'a> {
     ///
     /// Returns true if every finding has at least one applicable fix based on the mode,
     /// meaning no manual intervention would be required if all fixes are applied successfully.
-    pub(crate) fn all_findings_have_applicable_fixes(&self, fix_mode: crate::FixMode) -> bool {
-        use crate::finding::FixDisposition;
-
+    pub(crate) fn all_findings_have_applicable_fixes(&self, fix_mode: FixMode) -> bool {
         if self.findings.is_empty() {
             return true;
         }
@@ -211,9 +232,9 @@ impl<'a> FindingRegistry<'a> {
         self.findings.iter().all(|finding| {
             finding.fixes.iter().any(|fix| {
                 let disposition_matches = match fix_mode {
-                    crate::FixMode::Safe => matches!(fix.disposition, FixDisposition::Safe),
-                    crate::FixMode::UnsafeOnly => matches!(fix.disposition, FixDisposition::Unsafe),
-                    crate::FixMode::All => true,
+                    FixMode::Safe => matches!(fix.disposition, FixDisposition::Safe),
+                    FixMode::UnsafeOnly => matches!(fix.disposition, FixDisposition::Unsafe),
+                    FixMode::All => true,
                 };
 
                 disposition_matches && matches!(fix.key, InputKey::Local(_))

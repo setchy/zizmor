@@ -4,34 +4,273 @@ use crate::{
         Confidence, Finding, Persona, Severity,
         location::{Locatable as _, SymbolicLocation},
     },
+    models::{
+        AsDocument,
+        action::DockerAction,
+        workflow::{StepInner, matrix::Matrix},
+    },
     state::AuditState,
 };
 
-use github_actions_expressions::Expr;
-use github_actions_models::common::{DockerUses, expr::LoE};
-use github_actions_models::workflow::job::Container;
+use github_actions_expressions::{Expr, SpannedExpr, literal::Literal};
+use github_actions_models::{
+    action::DockerActionUses,
+    common::{
+        DockerUses,
+        expr::{ExplicitExpr, LoE},
+    },
+};
+use github_actions_models::{
+    common::Uses,
+    workflow::job::{Container, UsesStep},
+};
+use subfeature::Subfeature;
 
 use super::{Audit, AuditLoadError, audit_meta};
 
 pub(crate) struct UnpinnedImages;
 
+/// Represents some image reference, whether direct (i.e. literal) or
+/// indirect (i.e. an expression).
+enum Image<'doc> {
+    Literal(&'doc DockerUses),
+    Expr(&'doc ExplicitExpr),
+}
+
+impl<'doc> From<&'doc LoE<DockerUses>> for Image<'doc> {
+    fn from(value: &'doc LoE<DockerUses>) -> Self {
+        match value {
+            LoE::Expr(expr) => Image::Expr(expr),
+            LoE::Literal(lit) => Image::Literal(lit),
+        }
+    }
+}
+
+impl<'doc> From<&'doc DockerUses> for Image<'doc> {
+    fn from(value: &'doc DockerUses) -> Self {
+        Image::Literal(value)
+    }
+}
+
+/// A single candidate image reference, collected from a job or action and
+/// expanded through matrix references where possible.
+struct ImageCandidate<'doc> {
+    annotation: &'static str,
+    confidence: Confidence,
+    persona: Persona,
+    location: SymbolicLocation<'doc>,
+    related: Vec<SymbolicLocation<'doc>>,
+}
+
+impl<'doc> ImageCandidate<'doc> {
+    /// A candidate for a concrete image reference that we can analyze precisely.
+    ///
+    /// Returns `None` if the image is empty (i.e. no container) or is
+    /// acceptably pinned by a SHA256 hash.
+    fn concrete(
+        image: &DockerUses,
+        location: SymbolicLocation<'doc>,
+        related: Vec<SymbolicLocation<'doc>>,
+    ) -> Option<Self> {
+        if image.image().is_empty() {
+            return None;
+        }
+
+        let (annotation, persona) = match (image.tag(), image.hash()) {
+            // Pinned by hash: nothing to report.
+            (_, Some(_)) => return None,
+            (Some("latest"), None) => (
+                "container image uses the floating 'latest' tag",
+                Persona::Regular,
+            ),
+            (Some(_), None) => (
+                "container image is not pinned to a SHA256 hash",
+                Persona::Pedantic,
+            ),
+            (None, None) => ("container image is unpinned", Persona::Regular),
+        };
+
+        Some(Self {
+            annotation,
+            confidence: Confidence::High,
+            persona,
+            location,
+            related,
+        })
+    }
+
+    /// A candidate for an image reference that we can't analyze statically,
+    /// e.g. one derived from a non-`matrix` context or a dynamic matrix
+    /// expansion.
+    fn opaque(location: SymbolicLocation<'doc>, related: Vec<SymbolicLocation<'doc>>) -> Self {
+        Self {
+            annotation: "container image may be unpinned",
+            confidence: Confidence::Low,
+            persona: Persona::Regular,
+            location,
+            related,
+        }
+    }
+}
+
+/// Collect all candidate image references from a single image expression,
+/// expanding through the matrix where possible.
+fn collect_candidates<'doc>(
+    image: Image<'doc>,
+    location: &SymbolicLocation<'doc>,
+    matrix: Option<&Matrix<'doc>>,
+) -> Vec<ImageCandidate<'doc>> {
+    match image {
+        // A literal image reference, e.g. `image: foo:1.2.3`.
+        Image::Literal(image) => ImageCandidate::concrete(image, location.clone(), vec![])
+            .into_iter()
+            .collect(),
+        // An expression, e.g. `image: ${{ matrix.image }}`. We expand it into
+        // its possible leaf values and analyze each.
+        Image::Expr(expr) => {
+            let Ok(parsed) = Expr::parse(expr.as_bare()) else {
+                // We can't even parse the expression, so we can't say anything
+                // precise about it.
+                return vec![ImageCandidate::opaque(location.clone(), vec![])];
+            };
+
+            let leaves = parsed.leaf_expressions();
+            // When the entire expression is a single leaf (e.g. `${{ matrix.image }}`),
+            // it spans the whole feature and we annotate it directly. Otherwise
+            // each leaf gets its own subfeature location within the expression.
+            let single_leaf = leaves.len() == 1;
+
+            leaves
+                .into_iter()
+                .flat_map(|leaf| {
+                    let leaf_location = if single_leaf {
+                        location.clone()
+                    } else {
+                        location
+                            .clone()
+                            .subfeature(Subfeature::new(0, subfeature::Fragment::from(leaf)))
+                    };
+
+                    candidates_for_leaf(leaf, leaf_location, matrix)
+                })
+                .collect()
+        }
+    }
+}
+
+/// Collect candidate image references from a single leaf expression.
+fn candidates_for_leaf<'doc>(
+    leaf: &SpannedExpr<'_>,
+    location: SymbolicLocation<'doc>,
+    matrix: Option<&Matrix<'doc>>,
+) -> Vec<ImageCandidate<'doc>> {
+    match &leaf.inner {
+        // A string literal can be analyzed precisely as an image reference.
+        Expr::Literal(Literal::String(image)) => {
+            if image.is_empty() {
+                // Empty string literals contribute no image reference.
+                vec![]
+            } else {
+                ImageCandidate::concrete(&DockerUses::parse(image.as_ref()), location, vec![])
+                    .into_iter()
+                    .collect()
+            }
+        }
+        // A `matrix` context expands into its concrete values; analyze each.
+        Expr::Context(context) if context.child_of("matrix") => {
+            let Some(matrix) = matrix else {
+                tracing::warn!(
+                    "image references {raw} but job has no matrix",
+                    raw = leaf.origin.raw
+                );
+                return vec![];
+            };
+
+            let expansions = matrix.expansions();
+
+            // First: evaluate candidates from static expansions
+            let mut candidates = expansions
+                .iter()
+                .filter(|expansion| context.matches(expansion.path.as_str()))
+                .filter(|expansion| expansion.is_static())
+                .filter_map(|expansion| {
+                    let annotations = vec![
+                        matrix.location().key_only(),
+                        expansion
+                            .location()
+                            .annotated(format!("this expansion of {path}", path = expansion.path)),
+                    ];
+
+                    ImageCandidate::concrete(
+                        &DockerUses::parse(&expansion.value),
+                        location.clone(),
+                        annotations,
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            // Next: evaluate indirect expansions
+            // An indirect matrix, dimensions block means this path may
+            // take values we never saw -- possibly all of them.
+            if expansions.has_indirect_expansions() {
+                let mut annotations = vec![matrix.location().key_only().annotated("this matrix")];
+
+                let indirect_matrix = expansions.indirectly_expanded().as_ref().map(|location| {
+                    location
+                        .clone()
+                        .annotated("indirect `matrix` adds unanalyzable combinations")
+                });
+
+                let indirect_inclusions =
+                    expansions.indirect_inclusions().as_ref().map(|location| {
+                        location
+                            .clone()
+                            .annotated("`include` may add unanalyzable combinations")
+                    });
+
+                annotations.extend(indirect_matrix);
+                annotations.extend(indirect_inclusions);
+
+                candidates.push(ImageCandidate::opaque(location.clone(), annotations));
+            }
+
+            candidates
+        }
+        // Any other leaf (non-`matrix` context, function call, etc.) can't be
+        // analyzed statically.
+        _ => vec![ImageCandidate::opaque(location, vec![])],
+    }
+}
+
 impl UnpinnedImages {
-    fn build_finding<'doc>(
+    /// Collect every candidate image reference from a list of image
+    /// expressions (expanding through the matrix where possible) and emit
+    /// findings for any that are unpinned.
+    fn classify_images<'a, 'doc>(
         &self,
-        location: &SymbolicLocation<'doc>,
-        annotation: &'static str,
-        confidence: Confidence,
-        persona: Persona,
-        job: &super::NormalJob<'doc>,
-    ) -> Result<Finding<'doc>, AuditError> {
-        let mut annotated_location = location.clone();
-        annotated_location = annotated_location.annotated(annotation);
-        Self::finding()
-            .severity(Severity::High)
-            .confidence(confidence)
-            .add_location(annotated_location)
-            .persona(persona)
-            .build(job)
+        image_refs: Vec<(Image<'doc>, SymbolicLocation<'doc>)>,
+        matrix: Option<Matrix<'doc>>,
+        document: &'a impl AsDocument<'a, 'doc>,
+    ) -> Result<Vec<Finding<'doc>>, AuditError> {
+        let mut findings = vec![];
+
+        for (image, location) in image_refs {
+            for candidate in collect_candidates(image, &location, matrix.as_ref()) {
+                let mut finding = Self::finding()
+                    .severity(Severity::High)
+                    .confidence(candidate.confidence)
+                    .persona(candidate.persona)
+                    .add_location(candidate.location.annotated(candidate.annotation));
+
+                for related in candidate.related {
+                    finding = finding.add_location(related);
+                }
+
+                findings.push(finding.build(document)?);
+            }
+        }
+
+        Ok(findings)
     }
 }
 
@@ -47,28 +286,53 @@ impl Audit for UnpinnedImages {
         Ok(Self)
     }
 
+    async fn audit_docker_action<'doc>(
+        &self,
+        docker: &DockerAction<'doc>,
+        _config: &crate::config::Config,
+    ) -> anyhow::Result<Vec<Finding<'doc>>, AuditError> {
+        // Nothing to do if the action references its own intrinsic 'Dockerfile'
+        // rather than an external image.
+        let DockerActionUses::Image(image) = &docker.image else {
+            return Ok(vec![]);
+        };
+
+        self.classify_images(
+            vec![(image.into(), docker.location().with_keys(["image".into()]))],
+            None,
+            docker,
+        )
+    }
+
     async fn audit_normal_job<'doc>(
         &self,
         job: &super::NormalJob<'doc>,
         _config: &crate::config::Config,
     ) -> anyhow::Result<Vec<Finding<'doc>>, AuditError> {
-        let mut findings = vec![];
-        let mut image_refs_with_locations: Vec<(&'doc LoE<DockerUses>, SymbolicLocation<'doc>)> =
-            vec![];
+        let mut image_refs: Vec<(Image<'doc>, SymbolicLocation<'doc>)> = vec![];
 
-        if let Some(Container::Container { image, .. }) = &job.container {
-            image_refs_with_locations.push((
-                image,
-                job.location()
-                    .primary()
-                    .with_keys(["container".into(), "image".into()]),
-            ));
+        match &job.container {
+            Some(Container::Name(image)) => {
+                image_refs.push((
+                    image.into(),
+                    job.location().primary().with_keys(["container".into()]),
+                ));
+            }
+            Some(Container::Container { image, .. }) => {
+                image_refs.push((
+                    image.into(),
+                    job.location()
+                        .primary()
+                        .with_keys(["container".into(), "image".into()]),
+                ));
+            }
+            None => {}
         }
 
         for (service, config) in job.services.iter() {
             if let Container::Container { image, .. } = &config {
-                image_refs_with_locations.push((
-                    image,
+                image_refs.push((
+                    image.into(),
                     job.location().primary().with_keys([
                         "services".into(),
                         service.as_str().into(),
@@ -78,156 +342,22 @@ impl Audit for UnpinnedImages {
             }
         }
 
-        // TODO: Clean this mess up.
-        for (image, ref location) in image_refs_with_locations {
-            match image {
-                LoE::Expr(expr) => {
-                    let context = match Expr::parse(expr.as_bare()).map(|e| e.inner) {
-                        // Our expression is `${{ matrix.abc... }}`.
-                        Ok(Expr::Context(context)) if context.child_of("matrix") => context,
-                        // An invalid expression, or otherwise any expression that's
-                        // more complex than a simple matrix reference.
-                        // TODO: Be more precise in some of these cases.
-                        _ => {
-                            findings.push(self.build_finding(
-                                location,
-                                "container image may be unpinned",
-                                Confidence::Low,
-                                Persona::Regular,
-                                job,
-                            )?);
-                            continue;
-                        }
-                    };
-
-                    let Some(matrix) = job.matrix() else {
-                        tracing::warn!(
-                            "job references {expr} but has no matrix",
-                            expr = expr.as_bare()
-                        );
-                        continue;
-                    };
-
-                    for expansion in matrix
-                        .expansions()
-                        .iter()
-                        .filter(|e| context.matches(e.path.as_str()))
-                    {
-                        if !expansion.is_static() {
-                            findings.push(
-                                Self::finding()
-                                    .severity(Severity::High)
-                                    .confidence(Confidence::Low)
-                                    .persona(Persona::Regular)
-                                    .add_location(
-                                        location
-                                            .clone()
-                                            .primary()
-                                            .annotated("container image may be unpinned"),
-                                    )
-                                    .add_location(expansion.location())
-                                    .build(job)?,
-                            );
-                            break;
-                        } else {
-                            // Try and parse the expanded value as an image reference.
-                            let image = DockerUses::parse(&expansion.value);
-                            match (image.tag(), image.hash()) {
-                                // Image is pinned by hash.
-                                (_, Some(_)) => continue,
-                                // Docker image is pinned to "latest".
-                                (Some("latest"), None) => findings.push(
-                                    Self::finding()
-                                        .severity(Severity::High)
-                                        .confidence(Confidence::High)
-                                        .persona(Persona::Regular)
-                                        .add_location(
-                                            location
-                                                .clone()
-                                                .primary()
-                                                .annotated("container image is pinned to latest"),
-                                        )
-                                        .add_location(matrix.location().key_only())
-                                        .add_location(expansion.location().annotated(format!(
-                                            "this expansion of {path}",
-                                            path = expansion.path
-                                        )))
-                                        .build(job)?,
-                                ),
-                                // Docker image is pined to some other tag.
-                                (Some(_), None) => findings.push(
-                                    Self::finding()
-                                        .severity(Severity::High)
-                                        .confidence(Confidence::High)
-                                        .persona(Persona::Pedantic)
-                                        .add_location(location.clone().primary().annotated(
-                                            "container image is not pinned to a SHA256 hash",
-                                        ))
-                                        .add_location(matrix.location().key_only())
-                                        .add_location(expansion.location().annotated(format!(
-                                            "this expansion of {path}",
-                                            path = expansion.path
-                                        )))
-                                        .build(job)?,
-                                ),
-                                // Image is unpinned.
-                                (None, None) => findings.push(
-                                    Self::finding()
-                                        .severity(Severity::High)
-                                        .confidence(Confidence::High)
-                                        .persona(Persona::Regular)
-                                        .add_location(
-                                            location
-                                                .clone()
-                                                .primary()
-                                                .annotated("container image is unpinned"),
-                                        )
-                                        .add_location(matrix.location().key_only())
-                                        .add_location(expansion.location().annotated(format!(
-                                            "this expansion of {path}",
-                                            path = expansion.path
-                                        )))
-                                        .build(job)?,
-                                ),
-                            }
-                        }
-                    }
-                }
-                LoE::Literal(image) => match image.hash() {
-                    Some(_) => continue,
-                    None => match image.tag() {
-                        Some("latest") => {
-                            findings.push(self.build_finding(
-                                location,
-                                "container image is pinned to latest",
-                                Confidence::High,
-                                Persona::Regular,
-                                job,
-                            )?);
-                        }
-                        None => {
-                            findings.push(self.build_finding(
-                                location,
-                                "container image is unpinned",
-                                Confidence::High,
-                                Persona::Regular,
-                                job,
-                            )?);
-                        }
-                        Some(_) => {
-                            findings.push(self.build_finding(
-                                location,
-                                "container image is not pinned to a SHA256 hash",
-                                Confidence::High,
-                                Persona::Pedantic,
-                                job,
-                            )?);
-                        }
-                    },
-                },
+        for step in job.steps() {
+            if let StepInner::Uses(UsesStep {
+                uses: Uses::Docker(uses),
+                ..
+            }) = &*step
+            {
+                image_refs.push((
+                    uses.into(),
+                    step.location()
+                        .primary()
+                        .with_keys(["uses".into()])
+                        .subfeature(Subfeature::new(0, uses.raw())),
+                ));
             }
         }
 
-        Ok(findings)
+        self.classify_images(image_refs, job.matrix(), job)
     }
 }
